@@ -1311,6 +1311,115 @@ def assert_delivery_check_formats_its_counts():
     return "every count-bearing message is formatted"
 
 
+def assert_set_dimension_position_accepts_position():
+    """0.8.26 / P0-4 — 19 dimensions named D1 on one sheet, and no way to pick one."""
+    src = _read("tools/layout.py")
+    node = _function_node(ast.parse(src), "set_dimension_position")
+    assert node is not None, "set_dimension_position is gone"
+    assert "position_m" in [a.arg for a in node.args.args], (
+        "no position_m: repeated D1/D2 names cannot be told apart")
+    body = ast.get_source_segment(src, node) or ""
+    assert "_find_annotation_by_name(doc, name, position_m)" in body, (
+        "the finder is not given position_m")
+    assert "disambiguated_by_position" in body, (
+        "the receipt does not say whether position_m was used")
+    return "position_m disambiguation, mirroring delete_annotation"
+
+
+def assert_add_note_reports_final_bbox():
+    """0.8.26 / P1-5 — a note shifted 49 mm looked identical to one shifted 4 mm."""
+    src = _read("tools/layout.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src), "add_note")) or ""
+    assert "bbox_final" in body, (
+        "no bbox_final: the caller cannot tell what the note now covers")
+    assert "shifted_m" in body, "no shifted_m: the distance moved is unreported"
+    assert "_note_bbox" in body, "bbox_final is not derived from the box estimate"
+    return "receipt carries bbox_final + shifted_m"
+
+
+def assert_delivery_check_lists_missing():
+    """0.8.26 / P1-3 — "coverage 0.947, missing 5" without saying WHICH five."""
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "delivery_check")) or ""
+    assert "ledger_missing" in body, "no ledger_missing list in the receipt"
+    assert "unmatched_ledger" in body, (
+        "the list is not derived from reconcile_ledger's unmatched rows")
+    return "ledger_missing + count alongside the ratio"
+
+
+def assert_callout_text_verified():
+    """0.8.26 / P1-1 — a callout printed "Ø99" on a Ø6 hole and still counted as ok."""
+    src = _read("tools/drawing.py")
+    tree = ast.parse(src)
+    helper = _function_node(tree, "_callout_diameter_matches")
+    assert helper is not None, "_callout_diameter_matches is missing"
+    hbody = ast.get_source_segment(src, helper) or ""
+    assert "findall" in hbody and "Ø" in hbody, "the helper does not extract printed Ø values"
+    body = ast.get_source_segment(src, _function_node(tree, "add_hole_callouts")) or ""
+    assert "_callout_diameter_matches(" in body, (
+        "the printed diameter is never compared with the measured edge")
+    assert "_discard(" in body, (
+        "a rejected callout is left on the sheet — inventory and pixels disagree")
+    assert '"partial"' in body, (
+        "verdict still says ok when some callouts failed")
+    return "value check + discard rejected ink + partial verdict"
+
+
+def assert_prune_requires_confirmation():
+    """0.8.26 / P1-2 — following the orphan list would have deleted the 50 mm overall length."""
+    src = _read("tools/drawing.py")
+    node = _function_node(ast.parse(src), "prune_orphan_dimensions")
+    assert node is not None, "prune_orphan_dimensions is gone"
+    assert "confirm" in [a.arg for a in node.args.args], "no confirm gate"
+    body = ast.get_source_segment(src, node) or ""
+    assert "confirmation_required" in body, (
+        "a real delete no longer requires explicit confirmation")
+    assert "caveat" in body, "the receipt does not explain what orphan actually means"
+    assert "GetAttachedEntities2" in body, (
+        "the caveat does not name the API whose empty answer is being over-read")
+    server = _read("server.py")
+    assert "confirm" in server, "the wrapper does not forward confirm"
+    return "confirm gate + caveat naming GetAttachedEntities2"
+
+
+def assert_layout_blocked_by_other_views():
+    """0.8.26 / P0-2 — `fixed_obstacles` held only view-label notes, so dimensions were
+    pushed onto a neighbouring section view's hatching."""
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "layout_dimensions")) or ""
+    assert 'obstacle\": \"view' in body or '"obstacle": "view"' in body, (
+        "views are not seeded as obstacles")
+    assert 'other.get("view") == item.get("view")' in body, (
+        "the owning view is not excluded — every dimension would be pushed off its own view")
+    assert "unresolved" in body, "no unresolved list: moved < collisions stays unexplained"
+    assert "view_obstacles" in body, "the receipt does not count view obstacles"
+    return "other views block, own view exempt, unresolved reported"
+
+
+def assert_set_view_warns_about_derived():
+    """0.8.26 / P0-3 — moving a parent view leaves its section cut lines behind."""
+    src = _read("tools/layout.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src), "set_view")) or ""
+    assert "derived_views" in body, "no derived-view detection"
+    assert "cut_lines_detached_warning" in body, (
+        "the receipt does not warn that cut lines do not follow the parent view")
+    assert "GetBaseView" in body, "derived views are not found via GetBaseView"
+    # Two ways this check silently reported "no derived views" on 2026-10-31:
+    #   a) `GetBaseView` returns a raw PyIDispatch — `.Name` off it fails, needs Dispatch
+    #   b) the guard reused `aligned` ("position does NOT match the request"), so a view
+    #      moved exactly where asked skipped the check entirely
+    assert "Dispatch(base)" in body, (
+        "GetBaseView's pointer is not dispatched — .Name on it fails and the check goes quiet")
+    # Check the CONDITION, not the absence of the word: the docstring above explains the
+    # `aligned` trap using that very word, so a negative search matches its own comment.
+    assert "if requested is not None and position_after is not None:" in body, (
+        "the derived-view guard does not use 'the caller asked for a position' — reusing "
+        "`aligned` means an exact move skips the check")
+    return "detects derived views (dispatched pointer) and warns before the caller saves"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1363,6 +1472,13 @@ STATIC_REGRESSIONS = [
     ("0.8.25 plan filter wired", assert_plan_filter_reaches_auto_dimension),
     ("0.8.25 place_views vocabularies", assert_place_views_accepts_both_vocabularies),
     ("0.8.25 delivery_check formats", assert_delivery_check_formats_its_counts),
+    ("0.8.26 dim position pick", assert_set_dimension_position_accepts_position),
+    ("0.8.26 note bbox", assert_add_note_reports_final_bbox),
+    ("0.8.26 ledger missing list", assert_delivery_check_lists_missing),
+    ("0.8.26 callout text verified", assert_callout_text_verified),
+    ("0.8.26 prune confirm gate", assert_prune_requires_confirmation),
+    ("0.8.26 layout view obstacles", assert_layout_blocked_by_other_views),
+    ("0.8.26 cut line warning", assert_set_view_warns_about_derived),
 ]
 
 

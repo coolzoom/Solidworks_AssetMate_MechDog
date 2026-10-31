@@ -572,7 +572,7 @@ def verify_dimension_attachments(drawing_path: str, view_name: str | None = None
 @mcp.tool()
 def prune_orphan_dimensions(
     drawing_path: str, view_name: str | None = None,
-    dry_run: bool = True, save: bool = True,
+    dry_run: bool = True, save: bool = True, confirm: bool = False,
 ) -> str:
     """Delete dimensions attached to no geometry, which `delete_dimensions` cannot target.
 
@@ -583,9 +583,15 @@ def prune_orphan_dimensions(
     Dry-run by default — returns view / name / value / position per candidate. With
     `dry_run=False` it deletes them and RE-RUNS the attachment check, so `orphan_count_after`
     is measured, not assumed.
+
+    `confirm=True` is required for an actual delete: `orphan` only means
+    `GetAttachedEntities2` returned nothing, and dimensions moved with SetPosition can read
+    as orphan while still leading to real geometry (a report found the 50 mm overall length
+    in that list).
     """
     return _json(drawing.prune_orphan_dimensions(drawing_path, view_name=view_name,
-                                                 dry_run=dry_run, save=save))
+                                                 dry_run=dry_run, save=save,
+                                                 confirm=confirm))
 
 
 @mcp.tool()

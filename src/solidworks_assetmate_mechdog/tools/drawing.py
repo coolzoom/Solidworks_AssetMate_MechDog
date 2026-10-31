@@ -3587,6 +3587,7 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
         from . import ledger as _ledger
 
         blockers, pending, passed, checks = [], [], [], {}
+        ledger_missing = []
 
         def record(name, ok, detail=None, blocking=True):
             checks[name] = {"ok": bool(ok), "detail": detail}
@@ -3716,6 +3717,14 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
                    "台账覆盖率 %s（%s/%s 个尺寸在图纸上找到，缺 %s）"
                    % (coverage, rec.get("matched"), rec.get("ledger_dimensions"), unmatched),
                    blocking=False)
+            # P1-3: a ratio cannot tell you WHAT is missing, and on a "must be repairable
+            # from this drawing" job the missing five are the whole point.
+            ledger_missing = [
+                {"feature": row.get("feature"), "dimension": row.get("dimension"),
+                 "value_mm": row.get("value_mm"),
+                 "dimension_type": row.get("dimension_type")}
+                for row in (rec.get("unmatched_ledger") or [])
+            ]
         else:
             record("ledger_reconciled", False,
                    "对账失败: %s" % (rec.get("message") or "unknown"), blocking=False)
@@ -3742,6 +3751,9 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
             blockers=blockers,
             pending=pending,
             strict_attachments=bool(strict_attachments),
+            # P1-3: the concrete list behind `ledger_reconciled`'s ratio.
+            ledger_missing=ledger_missing,
+            ledger_missing_count=len(ledger_missing),
             facts={
                 "views": view_count,
                 "dimensions": dim_total,
@@ -3910,7 +3922,8 @@ def verify_dimension_attachments(drawing_path, view_name=None):
         return error("attachment_check_failed", str(exc))
 
 
-def prune_orphan_dimensions(drawing_path, view_name=None, dry_run=True, save=True):
+def prune_orphan_dimensions(drawing_path, view_name=None, dry_run=True, save=True,
+                            confirm=False):
     """Delete dimensions that are attached to no geometry (P2-4).
 
     `auto_dimension` imports every driving dimension; on real parts a share of them land
@@ -3922,6 +3935,13 @@ def prune_orphan_dimensions(drawing_path, view_name=None, dry_run=True, save=Tru
     `dry_run=False` deletes by name + position (position is what separates repeated D1/D2
     names) and then RE-RUNS the attachment check, so the receipt carries the remaining
     orphan count instead of assuming the deletes worked.
+
+    P1-2 — `orphan` means "GetAttachedEntities2 returned nothing", NOT "this dimension is
+    loose". A report moved dimensions with SetPosition and then found 11 orphans including
+    the 50 mm overall length and the 25 mm hole pitch; every one of them visibly led to real
+    geometry on the render. Deleting that list would have gutted the drawing. So a real
+    delete now requires `confirm=True`; without it the call returns
+    `confirmation_required` with the same list, and the receipt always carries `caveat`.
     """
     try:
         from . import layout as _layout
@@ -3942,10 +3962,24 @@ def prune_orphan_dimensions(drawing_path, view_name=None, dry_run=True, save=Tru
             "targets": targets,
             "removed_count": 0,
         }
+        # Always present, not only in dry-run: this is the sentence that decides whether
+        # deleting the list is safe, and it applies to both modes.
+        payload["caveat"] = (
+            "orphan 只表示 GetAttachedEntities2 返回空，不等于「尺寸真的孤立」。"
+            "实测：尺寸被 SetPosition 移动后会出现这种读不到附件的情况，"
+            "而它在图纸上有正常引线、指向真实几何（含总长、孔距这类关键尺寸）。"
+            "照单全删会让图纸缺料——先看渲染图逐条确认，或用 "
+            "delete_annotation(name + position_m) 精确删。")
         if dry_run or not targets:
             if not dry_run and not targets:
                 payload["note"] = "没有 orphan 尺寸需要清理。"
             return drawing_ok(**payload)
+        if not confirm:
+            return error(
+                "confirmation_required",
+                "检测到 %d 条 orphan 候选，但未确认删除（confirm=False）。" % len(targets),
+                "orphan 可能只是取不到附件。核对渲染图后再传 confirm=True。",
+                caveat=payload["caveat"], targets=targets)
 
         removed, failed = [], []
         for row in targets:
@@ -4059,6 +4093,25 @@ def list_circular_edges(drawing_path, view_name=None, min_diameter_mm=0.0):
         return error("bad_input", str(exc))
     except Exception as exc:
         return error("circle_scan_failed", str(exc))
+
+
+def _callout_diameter_matches(text, expected_mm, tol=0.08):
+    """True/False when the callout prints an explicit Ø; None when it prints none.
+
+    A report showed callouts reading "Ø6 贯穿 / Ø99 ↧3" on a part with no Ø99 anywhere.
+    The text PARSED and `IsHoleCallout` was true, so the tool signed off on a dimension that
+    contradicts the geometry. Comparing the printed values with the measured edge diameter
+    is the only cheap way to catch that — a wrong number is worse than a missing callout,
+    because the drawing looks authoritative.
+    """
+    import re
+
+    values = [float(v) for v in re.findall(r"[Ø⌀]\s*([0-9]+(?:\.[0-9]+)?)", str(text or ""))]
+    if not values:
+        return None
+    expected = float(expected_mm)
+    tol_abs = max(0.2, abs(expected) * float(tol))
+    return any(abs(v - expected) <= tol_abs for v in values)
 
 
 def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
@@ -4253,16 +4306,42 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
                 # a 220 mm track-wheel outline came back as is_hole_callout=true with
                 # text "R". Accepting that let "R" stand in for hole information and
                 # suppressed the missing-hole blocker — the tool fooling its own check.
+                def _discard(display_dim):
+                    """Delete a callout we are about to reject.
+
+                    Rejecting AFTER `AddHoleCallout2` still left the annotation on the sheet
+                    (and still counted in annotation.hole_callout), so the inventory and the
+                    pixels disagreed. Remove it before reporting failure.
+                    """
+                    try:
+                        ann = win.Dispatch(_call_method(display_dim, "GetAnnotation"))
+                        doc.ClearSelection2(True)
+                        if ann.Select(False):
+                            _call_method(doc, "EditDelete")
+                    except Exception:
+                        pass
+
                 text_upper = str(text or "").upper()
                 has_diameter = ("Ø" in str(text or "")) or ("MOD-DIAM" in text_upper) \
                     or text_upper.startswith("M") or " X " in text_upper
                 radius_only = text_upper.startswith("R") and not has_diameter
                 if radius_only or not has_diameter:
+                    _discard(dim)
                     failed.append({"view": view.Name,
                                    "diameter_mm": round(chosen["radius_m"] * 2000, 2),
                                    "reason": "not a hole callout (text=%r, likely an outer arc)"
                                              % (text,),
                                    "z": chosen["z"], "radius_only": True})
+                    continue
+                # P1-1: the printed number must agree with the measured edge.
+                expected_d = round(chosen["radius_m"] * 2000, 2)
+                if _callout_diameter_matches(text, expected_d) is False:
+                    _discard(dim)
+                    failed.append({"view": view.Name,
+                                   "diameter_mm": expected_d,
+                                   "reason": ("text_value_mismatch: callout says %r but the "
+                                              "edge measures Ø%.2f" % (str(text)[:40], expected_d)),
+                                   "z": chosen["z"]})
                     continue
                 callout_point = [anchor_x, anchor_y - slot * 0.012]
                 # `GetAnnotation` must be invoked as a METHOD under late binding (see
@@ -4363,15 +4442,17 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
             # selectable, the callout point sits exactly on the circle, and AddHoleCallout2
             # still returns null for every edge — while the same call succeeds on sheet-metal
             # cut holes. That is a geometry/build limit, not a parameter problem, so name it.
-            verdict=("ok" if created else
-                     ("no_native_callout" if groups_total and not created
-                      else "nothing_to_annotate")),
+            # P1-1: a run that produced callouts AND rejected some is `partial`, not `ok`.
+            # "budget_exceeded: true + 5 failed + verdict ok" was the old behaviour.
+            verdict=("ok" if created and not failed else
+                     ("partial" if created else
+                      ("no_native_callout" if groups_total else "nothing_to_annotate"))),
             native_callout_note=(
-                None if created or not groups_total else
-                ("%d 个孔的圆边全部返回 null。实测：边与相邻面都能选中、锚点就在圆上，"
-                 "AddHoleCallout2 仍是 None；同一调用在钣金拉伸孔上可用。属几何/构建限制，"
-                 "换 offset 或换视图不会改变结果——改用 add_drawing_dimension 或手动补 Ø 标注。"
-                 % len(failed))),
+                None if not failed else
+                ("%d 条成功、%d 条被拒（原因见 failed；被拒的标注已从图上撤销，不留残留）。"
+                 "实测：边与相邻面都能选中、锚点就在圆上时 AddHoleCallout2 仍可能返回 null，"
+                 "属几何/构建限制，换 offset 或换视图不会改变结果。"
+                 % (len(created), len(failed)))),
         )
     except (FileNotFoundError, ValueError) as exc:
         return error("bad_input", str(exc))
@@ -4923,6 +5004,25 @@ def layout_dimensions(drawing_path, view_name=None, min_gap_m=0.006,
 
         items = []
         fixed = []
+        # P0-2: OTHER views are obstacles. A dimension belonging to view A must not be
+        # pushed onto view B's outline — a report had main-view dimensions landing on the
+        # section view's hatching. The owning view is NOT an obstacle: dimensions
+        # legitimately sit inside their own view, and blocking that would shove every one
+        # of them off the sheet.
+        for view in views:
+            try:
+                view_box = precise_outline(view) or list(view.GetOutline)
+            except Exception:
+                view_box = None
+            if view_box and len(view_box) >= 4:
+                fixed.append({
+                    "annotation": None, "view": str(view.Name), "text": "",
+                    "x": (view_box[0] + view_box[2]) / 2.0,
+                    "y": (view_box[1] + view_box[3]) / 2.0,
+                    "w": max(1e-4, view_box[2] - view_box[0]),
+                    "h": max(1e-4, (view_box[3] - view_box[1]) / 2.0),
+                    "fixed": True, "obstacle": "view",
+                })
         for view in views:
             for raw in (view.GetAnnotations or ()):
                 annotation = win.Dispatch(raw)
@@ -5016,6 +5116,9 @@ def layout_dimensions(drawing_path, view_name=None, min_gap_m=0.006,
             for _attempt in range(40):
                 clash = None
                 for other in placed:
+                    if (other.get("obstacle") == "view"
+                            and other.get("view") == item.get("view")):
+                        continue      # dimensions may live inside their own view
                     if boxes_overlap(item, other):
                         clash = other
                         break
@@ -5029,6 +5132,24 @@ def layout_dimensions(drawing_path, view_name=None, min_gap_m=0.006,
                               "x": round(item["x"], 4), "to_y": round(item["y"], 4),
                               "around": "note" if clash.get("fixed") else "dimension"})
             placed.append(item)
+
+        # P0-2: say what is STILL overlapping. `moved < collisions` with no explanation
+        # left the caller unable to tell "gave up" from "nothing left to do".
+        unresolved = []
+        for item in items:
+            remaining = 0
+            for other in placed:
+                if other is item:
+                    continue
+                if (other.get("obstacle") == "view"
+                        and other.get("view") == item.get("view")):
+                    continue
+                if boxes_overlap(item, other):
+                    remaining += 1
+            if remaining:
+                unresolved.append({"view": item["view"], "text": item["text"][:10],
+                                   "x": round(item["x"], 4), "y": round(item["y"], 4),
+                                   "remaining_overlaps": remaining})
 
         # One pass fixes 64% (14 collisions -> 5): pushing one dimension up can create a new
         # collision with the next one, so the pass has to repeat until it settles.
@@ -5057,6 +5178,10 @@ def layout_dimensions(drawing_path, view_name=None, min_gap_m=0.006,
         return drawing_ok(dimension_count=len(items), collisions=len(moves),
                           moved=applied, dry_run=bool(dry_run),
                           fixed_obstacles=len(fixed),
+                          view_obstacles=sum(1 for o in fixed
+                                             if o.get("obstacle") == "view"),
+                          unresolved=unresolved[:20],
+                          unresolved_count=len(unresolved),
                           min_gap_mm=min_gap_m * 1000,
                           sample_moves=moves[:5],
                           note=("按 x 聚类后沿 y 推开，间距 %.0f mm。只动真正重叠的，"

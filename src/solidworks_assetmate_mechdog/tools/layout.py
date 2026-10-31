@@ -104,6 +104,35 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
         )
         if save:
             _save_drawing(doc)
+        # P0-3: moving a PARENT view does not carry its section cut lines with it — the
+        # cut line lives in the parent's sketch, and SolidWorks leaves it at the old sheet
+        # coordinates, so the section loses its cutting basis while still looking valid.
+        # The report paid for this twice (rebuild the section -> lose that view's
+        # dimensions). We cannot move the sketch from here, so say it before saving.
+        children = []
+        # NOTE: this used to reuse `aligned`, which means "the applied position does NOT
+        # match the request" — so a view that moved exactly where asked skipped the check
+        # and reported no derived views. Ask instead: did the caller request a position?
+        if requested is not None and position_after is not None:
+            import win32com.client as _win
+
+            for other in _iter_views(doc):
+                if getattr(other, "Type", None) == 1:
+                    continue
+                try:
+                    if str(other.Name) == str(view_name):
+                        continue
+                    # `GetBaseView` is a PROPERTY that returns a raw PyIDispatch: reading
+                    # `.Name` straight off it fails and the exception was being swallowed,
+                    # so this check silently always reported "no derived views" (measured
+                    # 2026-10-31: a section view does answer 工程图视图1 once dispatched).
+                    base = other.GetBaseView
+                    if base is None:
+                        continue
+                    if str(_win.Dispatch(base).Name) == str(view_name):
+                        children.append(str(other.Name))
+                except Exception:
+                    continue
         return drawing_ok(
             drawing=doc.GetTitle,
             requested=requested,
@@ -111,6 +140,13 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
             aligned_to_parent=aligned,
             alignment_reason=("section/detail views keep projection alignment with the "
                               "parent view" if aligned else None),
+            # P0-3: empty list means no derived views (detail/section) reference this one.
+            derived_views=children,
+            cut_lines_detached_warning=(
+                "本视图有派生视图 %r：切割线/边界草图不会随父视图平移，"
+                "请用 export_drawing + render_drawing 复核剖面位置，"
+                "或重建剖面（重建会丢该视图上已插入的尺寸）。" % children
+                if children else None),
             **applied,
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -356,11 +392,21 @@ def add_note(drawing_path, text, x_m, y_m, height_mm=None, bold=False, save=True
             name = str(_call_method(note, "GetAnnotation").GetName)
         except Exception:
             pass
+        # P1-5: report the box the note actually occupies. A multi-line note shifted by
+        # 49 mm looked identical to one shifted by 4 mm in the old receipt — only
+        # `adjusted: true` — so the caller could not tell whether it now sat on a view or
+        # the title block.
+        final_bbox = _note_bbox(str(text), float(x_m), float(y_m),
+                                (float(height_mm) / 1000.0) if height_mm else 0.0035)
         return drawing_ok(drawing=doc.GetTitle, note=name, text=str(text),
                           position_m=[round(float(x_m), 4), round(float(y_m), 4)],
                           position_requested_m=position_requested,
                           adjusted=bool(collisions_avoided),
-                          collisions_avoided=collisions_avoided)
+                          collisions_avoided=collisions_avoided,
+                          bbox_final=[round(v, 4) for v in final_bbox],
+                          shifted_m=([round(float(x_m) - position_requested[0], 4),
+                                      round(float(y_m) - position_requested[1], 4)]
+                                     if collisions_avoided else [0.0, 0.0]))
     except (FileNotFoundError, ValueError) as exc:
         return error("bad_input", str(exc))
     except Exception as exc:
@@ -837,7 +883,7 @@ def move_annotation(drawing_path, name, x_m, y_m, save=True, position_m=None):
         return error("move_annotation_failed", str(exc))
 
 
-def set_dimension_position(drawing_path, name, x_m, y_m, save=True):
+def set_dimension_position(drawing_path, name, x_m, y_m, save=True, position_m=None):
     """Move ONE dimension to a sheet position (metres), by its reported name.
 
     P0-2: `list_drawing_annotations` already gives every dimension a stable `name`; this is
@@ -845,17 +891,24 @@ def set_dimension_position(drawing_path, name, x_m, y_m, save=True):
     `move_annotation` it verifies the target really is a dimension (GetType 4), reports the
     dimension value, and refuses notes / GTOL / surface-finish symbols so a typo cannot
     silently move the wrong kind of annotation.
+
+    `position_m` disambiguates repeated names — SolidWorks reuses D1/D2/D3 per sketch, and a
+    40-dimension sheet can hold 19 of them called "D1". Pass the `position_m` that
+    `list_drawing_annotations` reported. Without it the first match wins, which is exactly
+    the wrong-dimension trap this tool otherwise exists to avoid.
     """
     try:
         import win32com.client as win
 
         doc = _open_drawing(drawing_path)
         doc.ClearSelection2(True)
-        annotation, _ = _find_annotation_by_name(doc, name)
+        annotation, matched = _find_annotation_by_name(doc, name, position_m)
         if annotation is None:
             return error("annotation_not_found",
-                         "no annotation named %r on this sheet" % name,
-                         "List names first with list_drawing_annotations.")
+                         "no annotation named %r%s on this sheet"
+                         % (name, " at %r" % (position_m,) if position_m else ""),
+                         "List names first with list_drawing_annotations; a repeated name "
+                         "needs position_m to tell the copies apart.")
         try:
             kind = int(annotation.GetType)
         except Exception:
@@ -894,6 +947,8 @@ def set_dimension_position(drawing_path, name, x_m, y_m, save=True):
             dimension=name, dimension_value_mm=value_mm,
             position_before_m=before, position_after_m=after,
             requested=[round(float(x_m), 4), round(float(y_m), 4)],
+            matched_position_m=([round(v, 4) for v in matched] if matched else None),
+            disambiguated_by_position=bool(position_m),
             applied=after != before, saved=bool(save))
     except (FileNotFoundError, ValueError) as exc:
         return error("bad_input", str(exc))
