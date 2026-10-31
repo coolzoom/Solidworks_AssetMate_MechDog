@@ -129,7 +129,8 @@ def _dodge_view_label(doc, view, gap_m=0.006, max_steps=12):
             "dimensions_moved": moved}
 
 
-def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True):
+def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True,
+             break_alignment=False):
     """Move and/or rescale one view. Coordinates are sheet metres.
 
     Position is written with DISPATCH_PROPERTYPUT + VARIANT(VT_ARRAY|VT_R8); a plain
@@ -156,6 +157,18 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
             names = [v.Name for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
             return error("view_not_found", "no view named %r" % view_name,
                          "Available: %s" % ", ".join(names))
+
+        # P1-7: a section view is locked to its parent along one axis, so the requested
+        # coordinate comes back "corrected" and multi-view layout gets stuck in a narrow
+        # strip beside the parent. IView.RemoveAlignment is the UI's 解除对齐; note it only
+        # clears THIS view's alignment, not what its children inherit.
+        alignment_broken = False
+        if break_alignment:
+            try:
+                _call_method(target, "RemoveAlignment")
+                alignment_broken = True
+            except Exception:
+                alignment_broken = False
 
         requested = None
         if x_m is not None and y_m is not None:
@@ -250,6 +263,7 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
                               "parent view" if aligned else None),
             # P1-9: what the label did, and how many dimensions had to move off it.
             view_label=label_dodge,
+            alignment_broken=alignment_broken,
             # P0-3: empty list means no derived views (detail/section) reference this one.
             derived_views=children,
             cut_lines_detached_warning=(

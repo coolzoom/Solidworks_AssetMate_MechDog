@@ -1183,3 +1183,27 @@ v0.8.24 曾判定它"复现不出来"，因为当时只看 `list_drawing_annotat
 另外：**标签 note 在改比例后才出现在 `view.GetAnnotations` 里**——所以避让必须挂在
 `set_view` 改比例之后，而不是等 `layout_dimensions` 事后处理。
 实测：停在标签 `[0.33, 0.6371]` 的尺寸被移到 `[0.33, 0.6497]`。
+
+## 二十四、剖视对齐与切割线：一个能解除，一个只能告警（0.8.29）
+
+### 解除对齐有正经 API
+
+`IView.RemoveAlignment()` 就是 UI 的「解除对齐」，必须在写 `Position` **之前**调用——
+顺序反了 SolidWorks 会把坐标改回去。文档明确：它只清当前视图的对齐，不影响子视图
+继承来的对齐。
+
+实测（垂直剖）：请求 `y = 父视图 y + 0.05`，不解除 → 回 `0.2793`（= 父视图 y）、
+`aligned_to_parent: true`；`break_alignment=True` → 落到 `0.3293`。
+
+### 切割线跟随：`IDrSection` 可读，写入方式未探明
+
+`IView.GetSection` **只在剖视图上**返回 `IDrSection`（父视图返回 None）：
+- `GetLineInfo` 可用，返回 12 个 double（切割线两端在模型坐标的点）
+- `GetLabel` → 'A'、`GetView` → 父视图
+- **`SetLineInfo` 存在但所有尝试都失败**：直接调用返回 False，
+  按 6/7/8/10/12 个参数传都报「无效的参数数目」——多半需要 VARIANT 数组或
+  额外的 line-count 参数，本轮没探明
+
+所以 v0.8.29 仍然只是「移动父视图时告警」（`derived_views` + `cut_lines_detached_warning`，
+0.8.26 已做），没有真正让线跟随。要真修，下一步得先确定 `SetLineInfo` 的签名，
+或者改走「重建剖面」路线（代价是该视图上的尺寸会丢）。

@@ -1498,6 +1498,29 @@ def assert_set_view_dodges_label():
     return "label detected, sized sanely, dimensions moved off it"
 
 
+def assert_set_view_break_alignment():
+    """0.8.29 / P1-7 — a section view is locked to its parent on one axis.
+
+    Measured 2026-11-01 on a vertical section: asking for y = parent+0.05 came back as the
+    parent's y (0.2793) with aligned_to_parent=True; after `break_alignment=True` the same
+    request landed at 0.3293. `IView.RemoveAlignment` is the UI's 解除对齐.
+    """
+    src = _read("tools/layout.py")
+    tree = ast.parse(src)
+    node = _function_node(tree, "set_view")
+    assert node is not None, "set_view is gone"
+    assert "break_alignment" in [a.arg for a in node.args.args], (
+        "no break_alignment: a section view can never leave the strip beside its parent")
+    body = ast.get_source_segment(src, node) or ""
+    assert "RemoveAlignment" in body, "RemoveAlignment is never called"
+    assert body.index("RemoveAlignment") < body.index('"Position"'), (
+        "alignment must be removed BEFORE the position is written, or SolidWorks snaps it back")
+    assert "alignment_broken" in body, "the receipt does not say whether alignment was broken"
+    server = _read("server.py")
+    assert "break_alignment" in server, "the wrapper does not forward break_alignment"
+    return "RemoveAlignment before Position, reported in the receipt"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1560,6 +1583,7 @@ STATIC_REGRESSIONS = [
     ("0.8.27 place outside layout", assert_place_outside_layout),
     ("0.8.28 title block one cell", assert_title_block_picks_one_cell),
     ("0.8.28 view label dodge", assert_set_view_dodges_label),
+    ("0.8.29 break alignment", assert_set_view_break_alignment),
 ]
 
 

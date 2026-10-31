@@ -306,14 +306,20 @@ def set_view(
     y_m: float | None = None,
     scale: float | None = None,
     save: bool = True,
+    break_alignment: bool = False,
 ) -> str:
     """Move and/or rescale one view (sheet metres).
 
     Writes IView.Position through DISPATCH_PROPERTYPUT with a VARIANT array — a plain
     assignment silently lands the view elsewhere.
+
+    `break_alignment=True` calls IView.RemoveAlignment first (the UI's 解除对齐), so a section
+    view can leave the strip beside its parent. It clears THIS view's alignment only; views
+    that inherit from it stay as they are.
     """
     return _json(layout.set_view(drawing_path, view_name, x_m=x_m, y_m=y_m,
-                                 scale=scale, save=save))
+                                 scale=scale, save=save,
+                                 break_alignment=break_alignment))
 
 
 @mcp.tool()
