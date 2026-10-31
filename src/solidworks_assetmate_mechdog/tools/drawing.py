@@ -1715,7 +1715,7 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
         doc = _open_drawing(drawing_path)
         sheet = doc.GetFirstView
         notes = _sheet_notes(sheet)
-        planned, unmatched, skipped_reversed = [], [], []
+        planned, unmatched, skipped_reversed, skipped_extra = [], [], [], []
 
         wants = []
         if name is not None:
@@ -1760,7 +1760,7 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
                                   "reason": "title block has no scale value in the bottom band"})
 
         for field, marker, new_value in wants:
-            hits = 0
+            candidates = []
             for note in notes:
                 try:
                     text = note.GetText
@@ -1768,8 +1768,6 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
                     continue
                 if not isinstance(text, str) or marker not in text:
                     continue
-                angle = 0.0
-                position = None
                 try:
                     position = [round(v, 4) for v in ann_position(note)]
                 except Exception:
@@ -1778,29 +1776,55 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
                     angle = float(note.Angle)
                 except Exception:
                     angle = 0.0
-                if not include_reversed and abs(angle) > 0.01:
+                reversed_note = abs(angle) > 0.01
+                if reversed_note and not include_reversed:
                     skipped_reversed.append({
-                        "field": field, "text": text, "angle_deg": round(angle * 180 / 3.141592653589793, 1),
-                    })
+                        "field": field, "text": text,
+                        "angle_deg": round(angle * 180 / 3.141592653589793, 1)})
                     continue
                 if field == "material":
                     before = text
                     after = text.replace("<未指定>", new_value).replace("<未指定 >", new_value)
                     if after == before:
-                        after = "材质 %s" % new_value if "<" not in text else text.replace(
-                            text[text.find("<"):text.find(">") + 1], new_value)
+                        after = ("材质 %s" % new_value if "<" not in text
+                                 else text.replace(
+                                     text[text.find("<"):text.find(">") + 1], new_value))
                 else:
                     before = text
                     after = new_value
-                planned.append({
+                candidates.append({
                     "field": field, "before": before, "after": after, "note": note,
                     "angle_deg": round(angle * 180 / 3.141592653589793, 1),
-                    "position": position,
+                    "position": position, "_reversed": reversed_note,
                 })
-                hits += 1
-            if hits == 0:
-                # Fall back to the slot position: many GB templates leave these cells
-                # with empty text, so there is nothing to match on.
+
+            if candidates:
+                # P1-4: several cells can carry the marker. A GB frame repeats 图样代号 in a
+                # 180-degree note OUTSIDE the frame, and writing both put a second code in
+                # the corner (measured: code at [0.053, 0.285] and [0.391, 0.022]). Keep
+                # ONE — upright first, then nearest the configured slot.
+                slot = TITLE_SLOTS.get(field)
+
+                def _rank(candidate, _slot=slot):
+                    distance = 0.0
+                    if _slot and candidate.get("position"):
+                        dx = candidate["position"][0] - _slot[0]
+                        dy = candidate["position"][1] - _slot[1]
+                        distance = (dx * dx + dy * dy) ** 0.5
+                    return (1 if candidate["_reversed"] else 0, distance)
+
+                candidates.sort(key=_rank)
+                chosen = candidates[0]
+                chosen.pop("_reversed", None)
+                planned.append(chosen)
+                for entry in candidates[1:]:
+                    skipped_extra.append({
+                        "field": field, "text": entry.get("before"),
+                        "position": entry.get("position"),
+                        "angle_deg": entry.get("angle_deg"),
+                        "reason": "another cell carries the same marker; kept the upright "
+                                  "one nearest the configured slot"})
+            else:
                 slot = TITLE_SLOTS.get(field)
                 note = _note_at(sheet, slot) if slot else None
                 if note is not None:
@@ -1812,6 +1836,39 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
                         "field": field, "before": before if isinstance(before, str) else "",
                         "after": new_value, "note": note, "via": "position",
                     })
+                elif slot:
+                    # P1-4 third tier: the cell can be an EMPTY table cell with no note at
+                    # all — the report on gb_a3.drwdot came back with planned: [] for every
+                    # field. Create the note at the slot instead of declaring it unmatched.
+                    created_note = None
+                    try:
+                        created_note = doc.InsertNote(str(new_value))
+                    except Exception:
+                        created_note = None
+                    if created_note is not None:
+                        try:
+                            import win32com.client as _win_tb
+
+                            _created_ann = _win_tb.Dispatch(
+                                _call_method(created_note, "GetAnnotation"))
+                            # SetPosition2 MUST go through call_method: pywin32 dispatches it
+                            # as a property and the call raises MEMBERNOTFOUND.
+                            _call_method(_created_ann, "SetPosition2",
+                                         float(slot[0]), float(slot[1]), 0.0)
+                        except Exception:
+                            pass
+                        try:
+                            created_note.SetHeight(0.0025)
+                        except Exception:
+                            pass
+                        planned.append({
+                            "field": field, "before": "", "after": new_value,
+                            "note": created_note, "via": "created",
+                        })
+                    else:
+                        unmatched.append({
+                            "field": field, "marker": marker,
+                            "reason": "no matching text and InsertNote failed"})
                 else:
                     unmatched.append({"field": field, "marker": marker})
 
@@ -1824,6 +1881,7 @@ def set_title_block(drawing_path, name=None, code=None, material=None, apply=Fal
                         for p in planned],
             "unmatched": unmatched,
             "skipped_reversed": skipped_reversed,
+            "skipped_extra_matches": skipped_extra,
             "applied": False,
         }
         if not apply:

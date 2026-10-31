@@ -35,6 +35,100 @@ def _prop_put(obj, name, value):
 from ..sw_session import call_method as _call_method
 
 
+def _dodge_view_label(doc, view, gap_m=0.006, max_steps=12):
+    """Move this view's dimensions off its own scale / label note (P1-9).
+
+    Changing a section view's scale makes SolidWorks regenerate the "A-A" / "2.5 : 1" label
+    at a position of its own choosing, and that position ignores dimensions already sitting
+    there — a report had 2.80 and the A-A tag printed on top of each other the moment a view
+    went 4:1 -> 2.5:1. `layout_dimensions` only treats the label as an obstacle when it
+    happens to run afterwards, which is not when the damage occurs.
+
+    The label is any non-empty note on the view: `IView.GetLabel` is not reachable under
+    late binding, and the ratio is not always a separate note. Overlapping dimensions
+    are pushed up one line height at a time until they clear every label box.
+    """
+    import win32com.client as win
+
+    try:
+        raws = list(view.GetAnnotations or ())
+    except Exception:
+        return None
+
+    # A view's own notes ARE its label ("A", "A-A", "2.5 : 1") — the ratio is not always a
+    # separate note, and `IView.GetLabel` is unreachable under late binding, so take every
+    # non-empty note on this view as a label candidate.
+    labels = []
+    for raw in raws:
+        try:
+            annotation = win.Dispatch(raw)
+            if int(annotation.GetType) != 6:
+                continue
+            note = win.Dispatch(annotation.GetSpecificAnnotation)
+            text = str(note.GetText or "")
+            position = [float(v) for v in annotation.GetPosition]
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        labels.append({"text": text[:20], "position": position})
+    if not labels:
+        return None
+
+    char_h = 0.0035
+    boxes = []
+    for label in labels:
+        # `<VLLABEL>/<VLSCALEV>` is what a view label's GetText really returns (confirmed
+        # 2026-11-01 — v0.8.24 concluded it was unreproducible because
+        # list_drawing_annotations happened not to surface it). It renders as "A—A" over
+        # "2.5 : 1", so 19 code characters are about 8 visible ones; using the raw length
+        # made the keep-out 40 mm wide and shoved dimensions away for no reason.
+        shown = label["text"]
+        if "<VL" in shown.upper():
+            shown = (shown.upper().replace("<VLLABEL>", "A—A")
+                     .replace("<VLSCALEV>", "2.5 : 1"))
+        half_w = max(char_h, len(shown) * char_h * 0.6)
+        boxes.append([label["position"][0] - half_w, label["position"][1] - char_h,
+                      label["position"][0] + half_w, label["position"][1] + char_h])
+
+    def _hits(candidate):
+        for box in boxes:
+            if (box[0] - gap_m < candidate[2] and candidate[0] < box[2] + gap_m
+                    and box[1] - gap_m < candidate[3] and candidate[1] < box[3] + gap_m):
+                return True
+        return False
+
+    moved = 0
+    for raw in raws:
+        try:
+            annotation = win.Dispatch(raw)
+            if int(annotation.GetType) != 4:
+                continue
+            position = [float(v) for v in annotation.GetPosition]
+        except Exception:
+            continue
+        half_text = 0.006
+        candidate = [position[0] - half_text, position[1] - char_h * 0.5,
+                     position[0] + half_text, position[1] + char_h * 0.5]
+        if not _hits(candidate):
+            continue
+        for _step in range(max_steps):
+            position[1] += char_h * 1.8
+            candidate = [position[0] - half_text, position[1] - char_h * 0.5,
+                         position[0] + half_text, position[1] + char_h * 0.5]
+            if not _hits(candidate):
+                break
+        try:
+            annotation.SetPosition(float(position[0]), float(position[1]), 0)
+            moved += 1
+        except Exception:
+            continue
+    return {"labels": [{"text": entry["text"],
+                        "position_m": [round(v, 4) for v in entry["position"]]}
+                       for entry in labels],
+            "dimensions_moved": moved}
+
+
 def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True):
     """Move and/or rescale one view. Coordinates are sheet metres.
 
@@ -97,6 +191,20 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
                 applied["scale"] = float(target.ScaleDecimal)
             except Exception:
                 pass
+        # P1-9: a scale change regenerates the view label at a SW-chosen spot; move this
+        # view's dimensions off it before the caller sees the result.
+        label_dodge = None
+        if scale is not None:
+            try:
+                label_dodge = _dodge_view_label(doc, target)
+                if label_dodge and label_dodge.get("dimensions_moved"):
+                    _call_method(doc, "EditRebuild3")
+                    try:
+                        doc.GraphicsRedraw2
+                    except Exception:
+                        pass
+            except Exception:
+                label_dodge = None
         aligned = bool(
             requested is not None and position_after is not None
             and (abs(position_after[0] - requested[0]) > 1e-4
@@ -140,6 +248,8 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True)
             aligned_to_parent=aligned,
             alignment_reason=("section/detail views keep projection alignment with the "
                               "parent view" if aligned else None),
+            # P1-9: what the label did, and how many dimensions had to move off it.
+            view_label=label_dodge,
             # P0-3: empty list means no derived views (detail/section) reference this one.
             derived_views=children,
             cut_lines_detached_warning=(

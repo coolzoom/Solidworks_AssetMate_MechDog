@@ -1155,3 +1155,31 @@ Python 在运行时才解析裸名字，于是：
 
 剩下 6 对重叠说明分层只解决了"出框"，不解决"同侧相邻两条太近"——
 需要在外面再跑一次 `layout_dimensions` 收尾。
+
+## 二十三、标题栏一字段多格，视图标签藏在 `<VLLABEL>` 里（0.8.28）
+
+### 同一个 marker 会命中多个单元格
+
+GB 图框在**框外**还有一条 180° 倒置的「图样代号」（在 `[0.053, 0.285]`，图纸左上角），
+标题栏里的正主在 `[0.391, 0.022]`。原实现 `marker in text` 就 `planned.append`，
+于是两处都写——图上多出一个倒着的代号。
+
+修法：收集候选，按 **(是否倒置, 距 `TITLE_SLOTS` 的距离)** 排序取第一个，
+其余写进 `skipped_extra_matches` 供核对。
+
+### 空单元格没有 note，位置兜底也找不到
+
+`_note_at(sheet, slot)` 只能找"已经存在的 note"。GB 模板那几格是空表格（只有线），
+根本没有 note 对象，于是 `planned: []`。第三级兜底改为 **`InsertNote` 在槽位新建**，
+注意位置必须 `call_method(ann, "SetPosition2", ...)`——属性派发会抛 MEMBERNOTFOUND。
+
+### 视图标签的 `GetText` 是 `<VLLABEL>/<VLSCALEV>`
+
+v0.8.24 曾判定它"复现不出来"，因为当时只看 `list_drawing_annotations`（那条路径没返回它）。
+直接读 `IAnnotation.GetSpecificAnnotation.GetText` 就能拿到。渲染后是「A—A」叠「2.5 : 1」，
+所以**估算宽度必须按可见文本**：19 个码字符直接乘字宽会得到 40 mm 的禁区，
+把无关尺寸推得很远。
+
+另外：**标签 note 在改比例后才出现在 `view.GetAnnotations` 里**——所以避让必须挂在
+`set_view` 改比例之后，而不是等 `layout_dimensions` 事后处理。
+实测：停在标签 `[0.33, 0.6371]` 的尺寸被移到 `[0.33, 0.6497]`。

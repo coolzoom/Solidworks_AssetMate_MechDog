@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solidworks-assetmate-mechdog"
-version = "0.8.27"
+version = "0.8.28"
 description = "SolidWorks MCP toolkit: recolor assemblies, inspect structure, export previews — with the COM pitfalls documented."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1452,6 +1452,52 @@ def assert_place_outside_layout():
     return "outside layout: 4 sides, precise boxes, user dims untouched, saved"
 
 
+def assert_title_block_picks_one_cell():
+    """0.8.28 / P1-4 — a GB frame repeats 图样代号 in a 180-degree note outside the frame.
+
+    Writing both put a second code in the corner (measured: code at [0.053, 0.285] and
+    [0.391, 0.022]). The report on gb_a3.drwdot also came back with planned: [] for every
+    field, so an empty table cell has to be CREATED, not skipped.
+    """
+    src = _read("tools/drawing.py")
+    tree = ast.parse(src)
+    node = _function_node(tree, "set_title_block")
+    assert node is not None, "set_title_block is gone"
+    body = ast.get_source_segment(src, node) or ""
+    assert "candidates" in body, "no candidate collection — every matching cell gets written"
+    assert "_rank" in body, "candidates are not ranked (upright first, then nearest slot)"
+    assert "skipped_extra" in body, (
+        "the extra matches are dropped silently instead of being reported")
+    assert "InsertNote" in body, (
+        "an empty title-block cell is still reported as unmatched instead of created")
+    assert 'via": "created' in body, "the receipt does not say the cell was created"
+    assert "SetPosition2" in body and "_call_method(_created_ann" in body, (
+        "the created note is not positioned through call_method (property dispatch fails)")
+    return "one cell per field, extras reported, empty cells created"
+
+
+def assert_set_view_dodges_label():
+    """0.8.28 / P1-9 — changing a section's scale regenerates its label, on top of dimensions.
+
+    Measured 2026-11-01: a dimension parked at the label position [0.33, 0.6371] was pushed to
+    [0.33, 0.6497] once the dodge ran (`dimensions_moved: 1`).
+    """
+    src = _read("tools/layout.py")
+    tree = ast.parse(src)
+    helper = _function_node(tree, "_dodge_view_label")
+    assert helper is not None, "_dodge_view_label is missing"
+    hbody = ast.get_source_segment(src, helper) or ""
+    assert "GetType" in hbody and "!= 6" in hbody, "it does not look for note annotations"
+    assert "VLLABEL" in hbody, (
+        "the <VLLABEL>/<VLSCALEV> code is not accounted for — its 19 characters made the "
+        "keep-out 40 mm wide")
+    assert "SetPosition" in hbody, "dimensions are never moved"
+    body = ast.get_source_segment(src, _function_node(tree, "set_view")) or ""
+    assert "_dodge_view_label(" in body, "set_view never calls the dodge after a scale change"
+    assert "view_label" in body, "the receipt does not report what the label did"
+    return "label detected, sized sanely, dimensions moved off it"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1512,6 +1558,8 @@ STATIC_REGRESSIONS = [
     ("0.8.26 layout view obstacles", assert_layout_blocked_by_other_views),
     ("0.8.26 cut line warning", assert_set_view_warns_about_derived),
     ("0.8.27 place outside layout", assert_place_outside_layout),
+    ("0.8.28 title block one cell", assert_title_block_picks_one_cell),
+    ("0.8.28 view label dodge", assert_set_view_dodges_label),
 ]
 
 
