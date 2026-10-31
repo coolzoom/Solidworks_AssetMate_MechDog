@@ -70,7 +70,7 @@ A3 最多 3 视图、批量读图必须逐张关闭、`material_library` 解析�
 | **v0.5** | 孔标注可用化 / 能力声明 / 出图前规划 | ✅ 已发布 |
 | **v0.6** | 形位公差可创建 / 一站式出图流水线 `produce_drawing` | ✅ 已发布（0.6.1） |
 | **v0.7** | 排版能力（视图摆位/尺寸删减/注记/件号/图纸直线）+ 钣金 QC + 展开依据声明 | ✅ 已发布（0.7.0） |
-| **v0.8** | **BOM 明细栏可用**（10 行 4 列含数量列）+ 第四道静态防线 | ✅ 已发布（0.8.0–0.8.26） |
+| **v0.8** | **BOM 明细栏可用**（10 行 4 列含数量列）+ 第四道静态防线 | ✅ 已发布（0.8.0–0.8.30） |
 | v0.9 | 几何测距（最小折弯边/孔到折弯线）、尺寸精准筛选、图面利用率、形位公差符号 | 🔜 下一个 |
 | v1.0 | 接口冻结、多配置与显示状态、升级说明 | 远期 |
 
@@ -102,6 +102,7 @@ A3 最多 3 视图、批量读图必须逐张关闭、`material_library` 解析�
 | ~~v0.8.6 反馈收尾（补）~~ | ✅ 0.8.20：P2-9 `add_detail_view` 请求比例不再被父视图覆盖 + 空视图/比例被锁结构化报错、P2-10 形位公差符号格改中文文字 fallback（`GetFrameSymbols2` 回读校验，写不进就删框）、P2-11 表面粗糙度修正位置谎报（`SetPosition` + 回读）+ PDF 像素可见性自检；回归断言 24 → 27、smoke 30 → 31 |
 | ~~P1-4 剖切算法~~ | ✅ 0.8.21：`add_section_view` 支持模型坐标剖切面（`cut_plane_normal`/`cut_plane_origin`，按视图 outline 与零件包围盒尺寸匹配定轴，斜切/平行图面/歧义全部结构化拒绝）+ 默认 `verify_cut` 用「剖切不改变未切方向尺寸」做 sanity（切错返回 `section_suspicious`，空剖返回 `section_empty`）；回归断言 27 → 30 |
 | ~~P0-1 / P2-13 全面收尾~~ | ✅ 0.8.22：**P0-1** `get_sw` 用 18 ms 探针每 2 s 校验缓存、失败即丢；`call_method` 区分忙/断线（忙退避重试 2 次、断线丢缓存抛 `BridgeLost`）；新增 `ping` 工具做真实往返并报 `recovered`；未处理异常 flush stderr + 写日志；修掉 `_LAST_CALL` 无初值导致**首次失败**日志写不出。**P2-13** outline 单一真源：删死代码 `ink_outline`（三条取点路实测失败），投影轴推断与点命中改用 `precise_outline`，detail 视图返回 `precise_outline_m`；回归断言 30 → 34、smoke 31 → 32、工具 54 → 55 |
+| ~~气缸盖 P0-5~~ | ✅ 0.8.30：**证伪 + 给替代**。`InsertModelAnnotations3` 是文档级幂等——同一驱动尺寸插过一次，再次调用**一律返回 None**：`all_views=True/False`、`duplicateDims=True/False`、激活目标视图，三组组合实测第二视图尺寸数恒为 0。所以不再假装能做：`check_capabilities` 新增 `duplicate_dimension_to_view`（`unsupported`），workaround 指向 `list_drawing_edges` + `add_drawing_dimension(view_name=...)` 在该视图**重新标注**（实测视图2 尺寸 0 → 1，`value_m=0.11`）；`auto_dimension` docstring 同步警示。回归断言 62 → 63、能力表 21 → 22 条 |
 | ~~气缸盖 P1-7~~ | ✅ 0.8.29：`set_view(break_alignment=True)` 先调 `IView.RemoveAlignment`（UI 的「解除对齐」）再写 `Position`，剖视不再被锁在父视图旁边。实测：不解除时请求 `y=parent+0.05` 被锁回 `0.2793`（`aligned_to_parent: true`），解除后落到 `0.3293`；回执带 `alignment_broken`。回归断言 61 → 62 |
 | ~~气缸盖 P1-4 / P1-9~~ | ✅ 0.8.28：**P1-4** `set_title_block` 每字段只选**一个**单元格（GB 图框在框外还有一条 180° 倒置的「图样代号」，原实现会同时写两处，实测 code 出现在 `[0.053,0.285]` 与 `[0.391,0.022]`）——按「正的优先、再取离槽位最近」排序，跳过的写进 `skipped_extra_matches`；空单元格改为**新建 note**（`InsertNote` + `call_method(SetPosition2)`），解决 gb_a3.drwdot 返回 `planned: []`。**P1-9** `set_view` 改比例后调用 `_dodge_view_label`：把该视图所有 note 当标签障碍，超界的尺寸上移避让；顺带确认 `<VLLABEL>/<VLSCALEV>` **确实存在**（推翻 0.8.24 的「未复现」结论），并按可见宽度估算避免 40 mm 虚胖禁区。实测：停在标签 `[0.33,0.6371]` 的尺寸被移到 `[0.33,0.6497]`；回归断言 59 → 61 |
 | ~~P0-1 尺寸摆位~~ | ✅ 0.8.27：`auto_dimension(place_outside=True)` 把本次插入的尺寸推到视图外**按侧分层**（`outside_gap_m` + n×`outside_step_m`），四侧就近分配、用 `precise_outline` 定位、只动本次插入、自动落盘。气缸盖实测：落在视图框内的尺寸 **21/25 → 0/25**，文本重叠 **17 对 → 6 对**（上 8 / 下 6 / 左 7 / 右 4）；回归断言 58 → 59 |

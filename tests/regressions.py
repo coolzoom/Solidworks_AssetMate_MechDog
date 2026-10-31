@@ -1521,6 +1521,31 @@ def assert_set_view_break_alignment():
     return "RemoveAlignment before Position, reported in the receipt"
 
 
+def assert_duplicate_dimension_declared_unsupported():
+    """0.8.30 / P0-5 — InsertModelAnnotations3 is document-level idempotent.
+
+    Measured 2026-11-01, three parameter combinations, second view stayed at 0 dimensions and
+    the call returned None every time. The honest answer is a capability entry that says so
+    and points at the path that DOES work: rebuild the dimension on that view's edge.
+    """
+    caps = _read("tools/capabilities.py")
+    assert '"duplicate_dimension_to_view"' in caps, (
+        "the limitation is not declared, so callers will burn a round discovering it")
+    index = caps.index('"duplicate_dimension_to_view"')
+    segment = caps[index:index + 1600]
+    assert '"unsupported"' in segment, "it is not marked unsupported"
+    assert "add_drawing_dimension" in segment, (
+        "no workaround points at the tool that can actually annotate the second view")
+    assert "InsertModelAnnotations3" in segment, (
+        "the entry does not name the API whose idempotence causes it")
+    # and the tool people call first should say so too
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src), "auto_dimension")) or ""
+    assert "idempotent" in body, (
+        "auto_dimension's docstring does not warn that a second view gets nothing")
+    return "declared unsupported with a working workaround"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1584,6 +1609,7 @@ STATIC_REGRESSIONS = [
     ("0.8.28 title block one cell", assert_title_block_picks_one_cell),
     ("0.8.28 view label dodge", assert_set_view_dodges_label),
     ("0.8.29 break alignment", assert_set_view_break_alignment),
+    ("0.8.30 duplicate dim unsupported", assert_duplicate_dimension_declared_unsupported),
 ]
 
 

@@ -1207,3 +1207,40 @@ v0.8.24 曾判定它"复现不出来"，因为当时只看 `list_drawing_annotat
 所以 v0.8.29 仍然只是「移动父视图时告警」（`derived_views` + `cut_lines_detached_warning`，
 0.8.26 已做），没有真正让线跟随。要真修，下一步得先确定 `SetLineInfo` 的签名，
 或者改走「重建剖面」路线（代价是该视图上的尺寸会丢）。
+
+## 二十五、驱动尺寸不能"补插到第二个视图"，但能在那重新标（0.8.30）
+
+### 参数改不出"重复插入"
+
+`InsertModelAnnotations3(source, types, allViews, duplicateDims, hidden, ...)` 的第 4 个参数
+看着像"允许插重复"，实际**不是决定因素**——这个调用是**文档级幂等**的：同一模型尺寸
+一旦插入过，第二次调用直接返回 `None`。
+
+实测（履带轮 P05，两视图）：
+
+| 组合 | 返回 | 视图1 | 视图2 |
+|---|---|---|---|
+| `all_views=True` 首次 | 12 | 12 | 0 |
+| 激活视图2 + `all_views=False` + `duplicateDims=True` | **None** | 12 | 0 |
+| 激活视图2 + `all_views=False` + `duplicateDims=False` | **None** | 12 | 0 |
+| `all_views=True` + `duplicateDims=True` | **None** | 12 | 0 |
+
+所以「局部放大视图永远 inserted: 0」不是 bug，是 API 的语义。
+
+### 能做的：在同一几何上重新标一条
+
+`add_drawing_dimension` 引用的是**视图里的边**，不是"某条模型驱动尺寸的副本"，
+所以它在第二个视图里能正常建：
+
+```
+list_drawing_edges(view_name="工程图视图2")        # 147 条边
+add_drawing_dimension(view_name="工程图视图2", edge_index=0)
+→ {"created": true, "value_m": 0.11, "selected": "edge_index"}
+```
+
+视图2 的尺寸数从 0 变成 1。数值必然与主视图一致（同一个模型几何），
+代价是它是一条**新标注**（`FullName` 不同），不是原尺寸的副本——
+所以 `reconcile_ledger` 会看到"图上有两条同值尺寸"，这属于正常。
+
+结论写进 `check_capabilities` 的 `duplicate_dimension_to_view`（`unsupported`），
+避免下一个使用者再花一轮去试参数。

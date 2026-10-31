@@ -194,6 +194,22 @@ CAPABILITIES = [
                      "引线自动引出），失败 8 个全为 Ø6 背面边（z=6.0）"),
     },
     {
+        "id": "duplicate_dimension_to_view",
+        "status": "unsupported",
+        "summary": "把同一条驱动尺寸补插到第二个视图（局部放大）",
+        "why": ("**API 层面做不到**（2026-11-01 实测）。`InsertModelAnnotations3` 是文档级幂等："
+                "同一模型尺寸一旦插入过，再次调用一律返回 None——`all_views=True/False`、"
+                "`duplicateDims=True/False`、激活目标视图，全部组合都试过，第二个视图始终 0 条。"
+                "具体实测：pass1 `all_views=True` 插 12 条（全在视图1）；"
+                "pass2 激活视图2 + `all_views=False` + `duplicateDims=True` → 返回 None；"
+                "pass3 `all_views=True` + `duplicateDims=True` → 也返回 None。"),
+        "workaround": ("在目标视图**重新标注**，不要想复制：先 `list_drawing_edges(view_name=...)` "
+                       "拿到该视图的边，再用 `add_drawing_dimension(view_name=..., edge_index=...)` "
+                       "建一条新尺寸。它引用的是同一个模型几何，数值必然一致，只是多一条标注"),
+        "evidence": ("2026-11-01 履带轮 P05：两视图实验，三组参数组合，第二视图尺寸数恒为 0；"
+                     "`InsertModelAnnotations3` 返回值恒为 None"),
+    },
+    {
         "id": "hole_callout_batch",
         "status": "pilot",
         "summary": "批量孔标注（带 verdict：能否标注由几何决定）",

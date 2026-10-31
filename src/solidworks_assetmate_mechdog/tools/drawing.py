@@ -1258,6 +1258,13 @@ def auto_dimension(drawing_path, all_views=True, include_unmarked=False, elimina
     Deletion uses the same mechanics as the duplicate pass, and aborts without deleting
     anything if the filter matches no inserted dimension.
 
+    This is document-level idempotent: a driving dimension inserted once will NOT be inserted
+    into a second view, whatever `all_views` / duplicate settings are used (measured
+    2026-11-01: three parameter combinations, second view stayed at 0). To annotate a detail
+    view with the same geometry, build a NEW dimension there instead — `list_drawing_edges`
+    + `add_drawing_dimension(view_name=...)`. See check_capabilities
+    `duplicate_dimension_to_view`.
+
     `place_outside=True` (P0-1) then moves everything this call inserted to just outside its
     view, stacked by side: `outside_gap_m` + slot * `outside_step_m`. SolidWorks' own offset
     is a fixed ~10 mm regardless of part size, so on a Ø46 disc 25 dimensions land inside the
