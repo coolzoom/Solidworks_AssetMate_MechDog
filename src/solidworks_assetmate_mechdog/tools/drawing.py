@@ -1135,8 +1135,113 @@ def _filter_inserted_dimensions(doc, before_names, win, keep):
     return len(kept), removed, failed, None
 
 
+def _push_dimensions_outside(doc, win, before_names, gap_m=0.012, step_m=0.008):
+    """Move the dimensions this call inserted to just OUTSIDE their view (P0-1).
+
+    SolidWorks inserts model dimensions at a fixed ~10 mm offset whatever the part size, so
+    on a Ø46 disc 25 dimensions land inside the outline and overprint each other. The
+    report's workaround was to scale the view up to 4:1 — that changes what the drawing
+    states instead of fixing the layout.
+
+    Each dimension is assigned to the NEAREST outline side of the view that contains it and
+    stacked outward: distance = gap + slot * step. Within one side the stacking order follows
+    the other axis, so two dimensions on the same side never share a distance.
+
+    Only annotations NOT in `before_names` are touched — a dimension the user placed by hand
+    is never moved.
+
+    Returns (placed_count, failures, sides_used).
+    """
+    views = [v for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
+    boxes = []
+    for view in views:
+        box = precise_outline(view)
+        if box and len(box) >= 4:
+            boxes.append((view, box))
+    if not boxes:
+        return 0, [{"reason": "no view outlines readable"}], {}
+
+    buckets = {}
+    failures = []
+    for view, box in boxes:
+        try:
+            raws = list(view.GetAnnotations or ())
+        except Exception:
+            continue
+        for raw in raws:
+            try:
+                annotation = win.Dispatch(raw)
+                if int(annotation.GetType) != 4:
+                    continue
+                name = str(annotation.GetName)
+            except Exception:
+                continue
+            if name in before_names:
+                continue                     # placed by the user, not by this call
+            try:
+                position = [float(v) for v in annotation.GetPosition]
+            except Exception:
+                continue
+
+            # Owning view: the box that contains it, else the one with the nearest centre.
+            owner_box = None
+            for _candidate, candidate_box in boxes:
+                if (candidate_box[0] <= position[0] <= candidate_box[2]
+                        and candidate_box[1] <= position[1] <= candidate_box[3]):
+                    owner_box = candidate_box
+                    break
+            if owner_box is None:
+                best = None
+                for _candidate, candidate_box in boxes:
+                    cx = (candidate_box[0] + candidate_box[2]) / 2.0
+                    cy = (candidate_box[1] + candidate_box[3]) / 2.0
+                    distance = (position[0] - cx) ** 2 + (position[1] - cy) ** 2
+                    if best is None or distance < best[0]:
+                        best = (distance, candidate_box)
+                if best is None:
+                    continue
+                owner_box = best[1]
+
+            edges = {
+                "left": abs(position[0] - owner_box[0]),
+                "right": abs(owner_box[2] - position[0]),
+                "bottom": abs(position[1] - owner_box[1]),
+                "top": abs(owner_box[3] - position[1]),
+            }
+            side = min(edges, key=edges.get)
+            order = position[1] if side in ("left", "right") else position[0]
+            buckets.setdefault((str(view.Name), side), []).append(
+                (order, annotation, position, owner_box))
+
+    placed = 0
+    sides_used = {}
+    for (view_name, side), items in buckets.items():
+        # Sort so the stacking follows the view's own reading order; the slot decides the
+        # distance from the outline, so equal-order items still separate.
+        items.sort(key=lambda entry: entry[0], reverse=(side in ("right", "top")))
+        sides_used["%s:%s" % (view_name, side)] = len(items)
+        for slot, (_order, annotation, position, box) in enumerate(items):
+            offset = gap_m + slot * step_m
+            if side == "left":
+                target = (box[0] - offset, position[1])
+            elif side == "right":
+                target = (box[2] + offset, position[1])
+            elif side == "bottom":
+                target = (position[0], box[1] - offset)
+            else:
+                target = (position[0], box[3] + offset)
+            try:
+                annotation.SetPosition(float(target[0]), float(target[1]), 0)
+                placed += 1
+            except Exception as exc:
+                failures.append({"view": view_name, "side": side,
+                                 "reason": str(exc)[:70]})
+    return placed, failures, sides_used
+
+
 def auto_dimension(drawing_path, all_views=True, include_unmarked=False, eliminate_duplicates=True,
-                   dimension_filter=None):
+                   dimension_filter=None, place_outside=False,
+                   outside_gap_m=0.012, outside_step_m=0.008):
     """Insert the model's driving dimensions into the drawing views.
 
     Equivalent to SolidWorks "Insert Model Items > Dimensions". Marked-for-drawing
@@ -1152,6 +1257,13 @@ def auto_dimension(drawing_path, all_views=True, include_unmarked=False, elimina
     after insertion, so "keep 8 of 41" actually ends with ~8 dimensions on the sheet.
     Deletion uses the same mechanics as the duplicate pass, and aborts without deleting
     anything if the filter matches no inserted dimension.
+
+    `place_outside=True` (P0-1) then moves everything this call inserted to just outside its
+    view, stacked by side: `outside_gap_m` + slot * `outside_step_m`. SolidWorks' own offset
+    is a fixed ~10 mm regardless of part size, so on a Ø46 disc 25 dimensions land inside the
+    outline and overprint; scaling the view up hides the symptom instead of fixing it.
+    Dimensions already on the sheet are never moved, and this path saves the drawing itself
+    (the rest of the function only edits in memory).
     """
     try:
         doc = _open_drawing(drawing_path)
@@ -1245,6 +1357,33 @@ def auto_dimension(drawing_path, all_views=True, include_unmarked=False, elimina
                 notes.append("dimension_filter 生效：保留 %s 条、删除 %d 条不符合规划"
                              "的尺寸（失败 %d 条）。"
                              % (filter_kept, len(filter_removed), len(filter_failed)))
+        # P0-1: push this call's dimensions outside their views, stacked by side.
+        outside_placed = 0
+        outside_failed = []
+        outside_sides = {}
+        if place_outside:
+            outside_placed, outside_failed, outside_sides = _push_dimensions_outside(
+                doc, _win_auto, before_names,
+                gap_m=float(outside_gap_m), step_m=float(outside_step_m))
+            try:
+                _call_method(doc, "EditRebuild3")
+            except Exception:
+                pass
+            try:
+                doc.GraphicsRedraw2()
+            except Exception:
+                pass
+            # Explicit save: this is the only branch that edits geometry the caller asked
+            # to be laid out, and the rest of the function never saves.
+            try:
+                _save_drawing(doc)
+            except Exception:
+                pass
+            notes.append(
+                "place_outside：%d 条尺寸已推到视图外按侧分层（外扩 %.0f mm + n×%.0f mm），"
+                "失败 %d 条。" % (outside_placed, float(outside_gap_m) * 1000,
+                                 float(outside_step_m) * 1000, len(outside_failed)))
+
         return ok(
             drawing=doc.GetTitle,
             inserted=count,
@@ -1266,6 +1405,10 @@ def auto_dimension(drawing_path, all_views=True, include_unmarked=False, elimina
             # 0.8.25: an explicit count — `dedupe_failed` is truncated to 10, so a run
             # that removed 0 and failed 23 used to be indistinguishable from a clean no-op.
             dedupe_failed_count=len(dedupe_failed),
+            place_outside_applied=bool(place_outside),
+            placed_outside=outside_placed,
+            outside_sides=outside_sides,
+            outside_failed=outside_failed[:10],
             advisory=notes,
             views=audit.get("views"),
             warnings=audit.get("warnings"),

@@ -918,6 +918,9 @@ def auto_dimension(
     include_unmarked: bool = False,
     eliminate_duplicates: bool = True,
     dimension_filter: list | None = None,
+    place_outside: bool = False,
+    outside_gap_m: float = 0.012,
+    outside_step_m: float = 0.008,
 ) -> str:
     """Insert the model's driving dimensions into the drawing (Insert Model Items).
 
@@ -927,10 +930,16 @@ def auto_dimension(
     dimension_filter: `plan_drawing()["keep_dimensions"]`. Everything inserted that the
     plan did not keep is deleted afterwards, so "keep 8 of 41" really ends with ~8
     dimensions. Aborts without deleting if nothing matches the filter.
+
+    place_outside=True moves everything this call inserted to just outside its view, stacked
+    by side (gap + n × step). Use it instead of scaling the view up to hide overprinting:
+    SolidWorks' own ~10 mm offset does not scale with the part.
     """
     return _json(drawing.auto_dimension(
         drawing_path, all_views=all_views, include_unmarked=include_unmarked,
         eliminate_duplicates=eliminate_duplicates, dimension_filter=dimension_filter,
+        place_outside=place_outside, outside_gap_m=outside_gap_m,
+        outside_step_m=outside_step_m,
     ))
 
 

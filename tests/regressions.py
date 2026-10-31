@@ -1420,6 +1420,38 @@ def assert_set_view_warns_about_derived():
     return "detects derived views (dispatched pointer) and warns before the caller saves"
 
 
+def assert_place_outside_layout():
+    """0.8.27 / P0-1 — SolidWorks' ~10 mm insertion offset does not scale with the part.
+
+    On a Ø46 disc 25 dimensions landed inside the outline (21 of 25, measured) and printed on
+    top of each other; the report's workaround was scaling the view to 4:1, which changes what
+    the drawing states rather than fixing the layout.
+    """
+    src = _read("tools/drawing.py")
+    tree = ast.parse(src)
+    node = _function_node(tree, "auto_dimension")
+    assert node is not None, "auto_dimension is gone"
+    args = [a.arg for a in node.args.args]
+    for want in ("place_outside", "outside_gap_m", "outside_step_m"):
+        assert want in args, "auto_dimension lost %r" % want
+    helper = _function_node(tree, "_push_dimensions_outside")
+    assert helper is not None, "_push_dimensions_outside is missing"
+    hbody = ast.get_source_segment(src, helper) or ""
+    assert "precise_outline" in hbody, (
+        "the layout does not use the deflated outline — the 11.9 mm phantom margin would "
+        "hold every dimension an extra 12 mm away")
+    assert "before_names" in hbody, (
+        "it does not exclude dimensions the user placed by hand")
+    for side in ("left", "right", "top", "bottom"):
+        assert '"%s"' % side in hbody, "side %r is not handled" % side
+    assert "step_m" in hbody and "gap_m" in hbody, "no stacking distance"
+    body = ast.get_source_segment(src, node) or ""
+    assert "_push_dimensions_outside(" in body, "the helper is never called"
+    assert "_save_drawing(doc)" in body, (
+        "place_outside moves geometry but does not save — the sheet on disk stays unchanged")
+    return "outside layout: 4 sides, precise boxes, user dims untouched, saved"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1479,6 +1511,7 @@ STATIC_REGRESSIONS = [
     ("0.8.26 prune confirm gate", assert_prune_requires_confirmation),
     ("0.8.26 layout view obstacles", assert_layout_blocked_by_other_views),
     ("0.8.26 cut line warning", assert_set_view_warns_about_derived),
+    ("0.8.27 place outside layout", assert_place_outside_layout),
 ]
 
 
