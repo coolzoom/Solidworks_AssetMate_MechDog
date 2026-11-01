@@ -219,6 +219,22 @@ CAPABILITIES = [
                      "两张图上切割线坐标一致（未跟随）；`GetLineInfo` 12 个值前后完全相同"),
     },
     {
+        "id": "hole_callout_text_slots",
+        "status": "partial",
+        "summary": "孔标注文字：带深度的孔会连成 Ø1515",
+        "why": ("`AddHoleCallout2` 产出的文字是 `<MOD-DIAM>` 格式码，必须用 `SetText` 改写，"
+                "但**直径和深度在不同文字槽里**：只写直径时深度留在另一槽，Ø15 深15 渲染成 "
+                "`Ø1515`（反馈里的 `Ø9 → Θ99` 就是同一件事）。三条路实测都不通——"
+                "① 只写直径 → 深度粘连；② 写直径后清空其余槽 → **标注整条消失**；"
+                "③ 完全不写 → 印出字面量 `<MOD-DIAM>`。"
+                "通孔（无深度，如门板 Ø8）正常，只有带深度的孔受影响。"),
+        "workaround": ("对带深度的孔改用 `add_drawing_dimension`（普通尺寸，文字可控），"
+                       "或建完标注后人工改一次文字；`add_hole_callouts` 的回执里 "
+                       "`text_source=SetText_depth_may_trail` 就是这条限制的标记"),
+        "evidence": ("2026-11-01 门板 A3：Ø8×2 渲染正常（`Ø8`），Ø15×3 渲染成 `Ø1515`；"
+                     "PDF 文本提取 + 渲染图双向确认"),
+    },
+    {
         "id": "duplicate_dimension_to_view",
         "status": "unsupported",
         "summary": "把同一条驱动尺寸补插到第二个视图（局部放大）",

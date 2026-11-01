@@ -1714,6 +1714,52 @@ def assert_axis_map_scales_to_sheet():
     return "model extents scaled before comparison"
 
 
+def assert_single_callout_matches_exact_circle():
+    """0.8.35 / P0 — single-point hole callout works, but only on annotatable circles.
+
+    Verified 2026-11-01 after fixing the axis-map scale: door.SLDPRT Ø8 ×2 + Ø15 ×3 all
+    return ok with matched_circle == the requested diameter; the four Ø6 circles fail for
+    BOTH the single and the batch tool (they are not annotatable holes), so a failure there
+    is correct behaviour, not a bug — hence the hint must say so instead of "no edge found".
+    """
+    src = _read("tools/drawing.py")
+    tree = ast.parse(src)
+    helper = _function_node(tree, "_nearest_circle_edge")
+    assert helper is not None, "_nearest_circle_edge is missing"
+    hbody = ast.get_source_segment(src, helper) or ""
+    assert "centre_model" in hbody, (
+        "the helper does not return the model centre, so the caller cannot pick the SAME "
+        "circle when several share a diameter")
+    assert "GetVisibleEntities2" in hbody, (
+        "it does not enumerate edges (coordinate hit-testing cannot reach drawing edges)")
+    body = ast.get_source_segment(src, _function_node(tree, "add_hole_callout")) or ""
+    assert "centre_model" in body, "the caller matches by diameter instead of exact centre"
+    assert "annotatable hole" in body, (
+        "a failed callout does not explain that the circle may simply not be a hole")
+    return "exact-circle match, honest failure hint"
+
+
+def assert_callout_depth_limit_declared():
+    """0.8.36 — a Ø15 hole with depth 15 prints "Ø1515" and there is no clean fix.
+
+    Three routes measured 2026-11-01: write only the diameter -> depth trails (Ø1515);
+    write the diameter then blank the other slots -> the whole callout disappears;
+    write nothing -> the raw "<MOD-DIAM>" prints literally. Through holes are fine (Ø8).
+    """
+    caps = _read("tools/capabilities.py")
+    assert '"hole_callout_text_slots"' in caps, (
+        "the slot limitation is undeclared — the next user will report Ø9 -> Θ99 again")
+    index = caps.index('"hole_callout_text_slots"')
+    segment = caps[index:index + 1600]
+    assert "SetText" in segment and "depth" in segment.lower(), (
+        "the entry does not explain which slots collide")
+    assert "add_drawing_dimension" in segment, "no workaround for depth holes"
+    src = _read("tools/drawing.py")
+    assert "SetText_depth_may_trail" in src, (
+        "the receipt does not flag that the depth may trail the diameter")
+    return "slot limit declared with a workaround"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1787,6 +1833,8 @@ STATIC_REGRESSIONS = [
     ("0.8.33 callout text value", assert_callout_text_carries_value),
     ("0.8.33 mojibake repaired", assert_mojibake_is_repaired),
     ("0.8.34 axis map scaled", assert_axis_map_scales_to_sheet),
+    ("0.8.35 single callout exact circle", assert_single_callout_matches_exact_circle),
+    ("0.8.36 callout depth limit", assert_callout_depth_limit_declared),
 ]
 
 

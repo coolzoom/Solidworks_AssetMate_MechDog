@@ -1560,7 +1560,9 @@ def _nearest_circle_edge(drawing_path, view_name, x, y, tolerance_m=0.005):
         distance = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5
         if best is None or distance < best[0]:
             best = (distance, edge, [round(cx, 5), round(cy, 5)],
-                    round(radius_m * 2000, 2))
+                    round(radius_m * 2000, 2),
+                    [round(centre_model[0], 6), round(centre_model[1], 6),
+                     round(centre_model[2], 6)])
     if best is None:
         if not axis_map:
             return None, "axes_mismatch: %s" % (reason or "no model->sheet mapping")
@@ -1573,6 +1575,7 @@ def _nearest_circle_edge(drawing_path, view_name, x, y, tolerance_m=0.005):
     # success while `AddHoleCallout2` then returns None — the symptom that made this tool
     # look impossible to fix. The caller re-finds the circle by diameter on its own handle.
     return {"centre": best[2], "diameter_mm": best[3],
+            "centre_model": best[4],
             "distance_m": round(best[0], 5)}, None
 
 
@@ -1655,6 +1658,10 @@ def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
 
             picked = False
             _cands = []
+            # Match the EXACT circle: several holes can share a diameter, and picking by
+            # diameter alone annotates a different hole than the caller pointed at (that is
+            # why the first attempt selected an edge, reported count 1, and still got null).
+            _want = circle_match.get("centre_model") or []
             try:
                 for _edge in [_win_pick.Dispatch(e)
                               for e in (target.GetVisibleEntities2(target, 1) or ())]:
@@ -1663,8 +1670,13 @@ def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
                         if _curve is None or not _curve.IsCircle:
                             continue
                         _params = list(_curve.CircleParams)
-                        if abs(float(_params[6]) * 2000
-                               - float(circle_match["diameter_mm"])) > 0.2:
+                        if len(_want) == 3:
+                            _d = sum(abs(float(_params[i]) - float(_want[i]))
+                                     for i in range(3))
+                            if _d > 1e-6:
+                                continue
+                        elif abs(float(_params[6]) * 2000
+                                 - float(circle_match["diameter_mm"])) > 0.2:
                             continue
                         _cands.append((float(_params[2]), _edge))
                     except Exception:
@@ -1714,8 +1726,11 @@ def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
                 "callout_failed",
                 "AddHoleCallout2 returned None at (%.4f, %.4f)" % tuple(callout_point),
                 "Circle {dia} matched at distance {dist} m; selection before the call: "
-                "{sel}. If that is >=1, the edge was selected and SolidWorks still refused "
-                "— use add_hole_callouts (batch) for this view.".format(
+                "{sel}. With a match and a selection, SolidWorks still refused — this "
+                "circle is probably not an annotatable hole (an outer arc, or the far face). "
+                "The batch tool has the same limit: on door.SLDPRT it annotates Ø8/Ø15 and "
+                "never the four Ø6 circles. Pick another circle from list_circular_edges."
+                .format(
                     dia=(circle_matched or {}).get("diameter_mm"),
                     dist=(circle_matched or {}).get("distance_m"),
                     sel=_sel_count),
@@ -4872,6 +4887,32 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
             dim_obj = item.pop("_annotation", None)
             if dim_obj is None:
                 continue
+            # Only rewrite a RAW FORMAT CODE. Writing "Ø15" into slot 1 replaced the
+            # diameter but left the depth sitting in another slot, so a Ø15 hole rendered as
+            # "Ø1515" — the report's "Ø9 -> Θ99". A Ø8 through-hole has no depth and looked
+            # fine, which is why this hid for so long. When the callout already reads
+            # correctly, SolidWorks' own hole-table text is the right answer.
+            # NO SetText. Writing "Ø15" into one slot replaced the diameter while the
+            # depth stayed in another, so the sheet printed "Ø1515" — the report's
+            # "Ø9 -> Θ99". A Ø8 through hole has no depth, which is why it looked fine.
+            # SolidWorks' own hole-table text is correct; only the RECEIPT needs a value,
+            # and only when the text cannot be read (SW2026 returns None for every slot).
+            _native = ""
+            for _probe in (1, 0, 2):
+                try:
+                    _candidate = dim_obj.GetText(_probe)
+                except Exception:
+                    continue
+                if _candidate and str(_candidate).strip():
+                    _native = str(_candidate)
+                    break
+            if _native and "<MOD-" not in _native.upper():
+                item["text"] = _native
+                item["text_source"] = "native"
+                continue
+            # The raw "<MOD-DIAM>" must be replaced or it prints literally, but writing only
+            # the diameter leaves the DEPTH in another slot: a Ø15 hole then reads "Ø1515"
+            # (the report's "Ø9 -> Θ99"). So write the diameter, then blank the other slots.
             diameter = item.get("diameter_mm")
             try:
                 target = chr(216) + "%g" % round(float(diameter), 2)
@@ -4882,17 +4923,22 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
                     dim_obj.SetText(slot, target)
                 except Exception:
                     continue
-                texts = []
-                for probe in range(3):
-                    try:
-                        texts.append(str(dim_obj.GetText(probe) or ""))
-                    except Exception:
-                        texts.append("")
-                filled = [t for t in texts if t.strip()]
-                if filled:
-                    item["text"] = filled[0]
-                    item["text_source"] = "SetText"
-                    break
+                break
+            # KNOWN LIMIT (0.8.36): when the hole also carries a depth, that depth lives in
+            # another text slot and SetText cannot clear it without erasing the annotation —
+            # blanking the other slots made the callout disappear entirely (measured). So a
+            # Ø15 hole WITH depth 15 still prints "Ø1515". A through hole (Ø8 here) is fine.
+            item["text"] = target
+            item["text_source"] = "SetText_depth_may_trail"
+            texts = []
+            for probe in range(3):
+                try:
+                    texts.append(str(dim_obj.GetText(probe) or ""))
+                except Exception:
+                    texts.append("")
+            filled = [t for t in texts if t.strip()]
+            if filled:
+                item["text"] = filled[0]
 
         unresolved = [c for c in created
                       if "<MOD-" in str(c.get("text") or "").upper()]
