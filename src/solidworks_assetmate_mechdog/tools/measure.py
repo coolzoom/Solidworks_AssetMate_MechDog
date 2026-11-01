@@ -20,6 +20,7 @@ from ..sw_session import (
     error,
     ok,
     open_document,
+    tool_guard,
 )
 
 _ENTITY_TYPES = {"FACE": "FACE", "EDGE": "EDGE", "VERTEX": "VERTEX",
@@ -48,6 +49,7 @@ def _select_entity(doc, spec):
                             "point": [x, y, z] if point else None}
 
 
+@tool_guard("measure_failed")
 def measure_entities(path, entities):
     """Measure between one or two entities of a part/assembly (read-only).
 
@@ -58,67 +60,62 @@ def measure_entities(path, entities):
     """
     if not entities or len(entities) > 2:
         return error("bad_input", "entities must be a list of 1 or 2 specs")
+    doc = open_document(path)
+    measure = doc.Extension.CreateMeasure
+    if measure is None:
+        return error("measure_unavailable",
+                     "Extension.CreateMeasure returned null on this binding")
     try:
-        doc = open_document(path)
-        measure = doc.Extension.CreateMeasure
-        if measure is None:
-            return error("measure_unavailable",
-                         "Extension.CreateMeasure returned null on this binding")
+        doc.ClearSelection2(True)
+    except Exception:
+        pass
+    described = []
+    for spec in entities:
         try:
-            doc.ClearSelection2(True)
-        except Exception:
-            pass
-        described = []
-        for spec in entities:
-            try:
-                selected, row = _select_entity(doc, spec)
-            except ValueError as exc:
-                return error("bad_input", str(exc))
-            row["selected"] = selected
-            described.append(row)
-            if not selected:
-                return error(
-                    "select_failed",
-                    "Could not select entity %r — the name may be wrong or the "
-                    "point may not land on it" % spec,
-                    "list_drawing_edges / build_feature_ledger report model "
-                    "coordinates that can feed the point form.",
-                    entities=described)
-        try:
-            calculated = measure.Calculate()
-        except Exception as exc:
-            return error("measure_failed", "Calculate() raised: %s" % exc,
-                         entities=described)
-        result = {"document": str(doc.GetTitle), "entities": described,
-                  "calculated": bool(calculated)}
-
-        def _num(name):
-            try:
-                return float(getattr(measure, name))
-            except Exception:
-                return None
-
-        if len(entities) == 2:
-            result["units"] = {"distance": "m", "angle": "deg", "delta": "m"}
-            for key in ("Distance", "DeltaX", "DeltaY", "DeltaZ", "Angle",
-                        "CenterX", "CenterY", "CenterZ"):
-                value = _num(key)
-                if value is not None:
-                    result[key.lower()] = value
-            for key in ("IsBetween", "IsParallel", "IsPerpendicular", "IsIntersect"):
-                try:
-                    result[key.lower()] = bool(getattr(measure, key))
-                except Exception:
-                    pass
-        else:
-            result["units"] = {"length": "m", "area": "m^2", "diameter": "m"}
-            for key in ("Area", "Perimeter", "Diameter", "TotalLength",
-                        "CenterX", "CenterY", "CenterZ", "Radius"):
-                value = _num(key)
-                if value is not None:
-                    result[key.lower()] = value
-        return ok(**result)
-    except (FileNotFoundError, ValueError, PermissionError) as exc:
-        return error("bad_input", str(exc))
+            selected, row = _select_entity(doc, spec)
+        except ValueError as exc:
+            return error("bad_input", str(exc))
+        row["selected"] = selected
+        described.append(row)
+        if not selected:
+            return error(
+                "select_failed",
+                "Could not select entity %r — the name may be wrong or the "
+                "point may not land on it" % spec,
+                "list_drawing_edges / build_feature_ledger report model "
+                "coordinates that can feed the point form.",
+                entities=described)
+    try:
+        calculated = measure.Calculate()
     except Exception as exc:
-        return error("measure_failed", str(exc))
+        return error("measure_failed", "Calculate() raised: %s" % exc,
+                     entities=described)
+    result = {"document": str(doc.GetTitle), "entities": described,
+              "calculated": bool(calculated)}
+
+    def _num(name):
+        try:
+            return float(getattr(measure, name))
+        except Exception:
+            return None
+
+    if len(entities) == 2:
+        result["units"] = {"distance": "m", "angle": "deg", "delta": "m"}
+        for key in ("Distance", "DeltaX", "DeltaY", "DeltaZ", "Angle",
+                    "CenterX", "CenterY", "CenterZ"):
+            value = _num(key)
+            if value is not None:
+                result[key.lower()] = value
+        for key in ("IsBetween", "IsParallel", "IsPerpendicular", "IsIntersect"):
+            try:
+                result[key.lower()] = bool(getattr(measure, key))
+            except Exception:
+                pass
+    else:
+        result["units"] = {"length": "m", "area": "m^2", "diameter": "m"}
+        for key in ("Area", "Perimeter", "Diameter", "TotalLength",
+                    "CenterX", "CenterY", "CenterZ", "Radius"):
+            value = _num(key)
+            if value is not None:
+                result[key.lower()] = value
+    return ok(**result)

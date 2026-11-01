@@ -7,7 +7,7 @@ the model is never modified.
 
 import os
 
-from ..sw_session import SW_DOC_PART, error, ok, open_document
+from ..sw_session import SW_DOC_PART, error, ok, open_document, tool_guard
 
 # Feature types that carry geometry worth cataloguing; folders and bookkeeping are skipped.
 FOLDER_TYPES = {
@@ -355,6 +355,7 @@ def build_feature_ledger(model_path, include_faces=True, config=None):
         return error("ledger_failed", str(exc))
 
 
+@tool_guard("features_failed")
 def list_features(model_path, include_folders=False):
     """Flat feature-tree listing: name, type, suppression state. Read-only.
 
@@ -363,38 +364,33 @@ def list_features(model_path, include_folders=False):
     model" and target features for list_mates / set_component_state style
     follow-ups without paying for the full ledger walk.
     """
-    try:
-        model = open_document(model_path)
-        rows = []
-        feature = model.FirstFeature
-        guard = 0
-        while feature is not None and guard < 2000:
-            guard += 1
-            try:
-                ftype = feature.GetTypeName2
-            except Exception:
-                ftype = None
-            if ftype in FOLDER_TYPES and not include_folders:
-                feature = feature.GetNextFeature
-                continue
-            row = {"index": len(rows), "name": None, "type": ftype,
-                   "suppressed": None}
-            try:
-                row["name"] = str(feature.Name)
-            except Exception:
-                pass
-            try:
-                row["suppressed"] = bool(feature.IsSuppressed)
-            except Exception:
-                pass
-            rows.append(row)
+    model = open_document(model_path)
+    rows = []
+    feature = model.FirstFeature
+    guard = 0
+    while feature is not None and guard < 2000:
+        guard += 1
+        try:
+            ftype = feature.GetTypeName2
+        except Exception:
+            ftype = None
+        if ftype in FOLDER_TYPES and not include_folders:
             feature = feature.GetNextFeature
-        return ok(document=str(model.GetTitle), path=str(model.GetPathName),
-                  count=len(rows), features=rows)
-    except (FileNotFoundError, ValueError, PermissionError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("features_failed", str(exc))
+            continue
+        row = {"index": len(rows), "name": None, "type": ftype,
+               "suppressed": None}
+        try:
+            row["name"] = str(feature.Name)
+        except Exception:
+            pass
+        try:
+            row["suppressed"] = bool(feature.IsSuppressed)
+        except Exception:
+            pass
+        rows.append(row)
+        feature = feature.GetNextFeature
+    return ok(document=str(model.GetTitle), path=str(model.GetPathName),
+              count=len(rows), features=rows)
 
 
 def _material_of(model):

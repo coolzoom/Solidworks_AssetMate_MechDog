@@ -11,6 +11,8 @@ pywin32 is imported lazily so the package stays importable off-Windows.
 from __future__ import annotations
 
 import os
+import queue as _queue
+import threading as _threading
 import time
 
 SW_DOC_PART = 1
@@ -278,9 +280,6 @@ def variant(value, vartype):
 # pywin32 it falls back to inline execution so imports and static tests still
 # work; ASSETMATE_COM_INLINE=1 forces the fallback (debug escape hatch).
 # ---------------------------------------------------------------------------
-
-import queue as _queue
-import threading as _threading
 
 _COM_THREAD = None
 _COM_TASKS = None
@@ -744,3 +743,36 @@ def error(code, message, hint=None, **extra):
     if extra:
         payload.update(extra)
     return payload
+
+
+def tool_guard(code):
+    """Decorate a tool body with the kit's standard error contract.
+
+    Every tool used to end with the same three clauses; 56 copies of the same
+    tail is 56 places to drift. This decorator is the single convention point:
+
+      FileNotFoundError / ValueError      -> error("bad_input", ...)
+      PermissionError (path sandbox)      -> error("path_not_allowed", ...)
+      anything else                       -> error(<code>, ...)
+
+    New tools should use it instead of open-coding the tail; existing tools
+    migrate only when touched for another reason (the churn is not worth a
+    dedicated pass).
+    """
+    import functools
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except PermissionError as exc:
+                return error("path_not_allowed", str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                return error("bad_input", str(exc))
+            except Exception as exc:
+                return error(code, str(exc))
+
+        return wrapper
+
+    return decorate

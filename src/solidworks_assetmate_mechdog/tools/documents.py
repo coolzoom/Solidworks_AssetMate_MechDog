@@ -24,6 +24,7 @@ from ..sw_session import (
     invalidate_components,
     ok,
     open_document,
+    tool_guard,
 )
 
 _DOC_TYPE_NAMES = {SW_DOC_PART: "part", SW_DOC_ASSEMBLY: "assembly",
@@ -258,6 +259,7 @@ def save_document(path=None, new_path=None, overwrite=False):
         return error("save_failed", str(exc))
 
 
+@tool_guard("rebuild_failed")
 def rebuild_document(path=None, force=False):
     """Rebuild a model and report what changed.
 
@@ -266,33 +268,28 @@ def rebuild_document(path=None, force=False):
     drawing-induced dirty flag (which a rebuild clears) is told apart from a
     real model change.
     """
+    if path:
+        doc = open_document(path)
+    else:
+        doc = get_sw().ActiveDoc
+        if doc is None:
+            return error("no_active_doc", "No active document and no path given")
+    row = _doc_row(doc)
     try:
-        if path:
-            doc = open_document(path)
-        else:
-            doc = get_sw().ActiveDoc
-            if doc is None:
-                return error("no_active_doc", "No active document and no path given")
-        row = _doc_row(doc)
-        try:
-            needed_before = bool(doc.Extension.NeedsRebuild2)
-        except Exception:
-            needed_before = None
-        if force:
-            doc.ForceRebuild3(False)
-        else:
-            call_method(doc, "EditRebuild3")
-        try:
-            needs_rebuild = bool(doc.Extension.NeedsRebuild2)
-        except Exception:
-            needs_rebuild = None
-        return ok(action="rebuilt", forced=force,
-                  needed_rebuild_before=needed_before,
-                  needs_rebuild=needs_rebuild, **row)
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("rebuild_failed", str(exc))
+        needed_before = bool(doc.Extension.NeedsRebuild2)
+    except Exception:
+        needed_before = None
+    if force:
+        doc.ForceRebuild3(False)
+    else:
+        call_method(doc, "EditRebuild3")
+    try:
+        needs_rebuild = bool(doc.Extension.NeedsRebuild2)
+    except Exception:
+        needs_rebuild = None
+    return ok(action="rebuilt", forced=force,
+              needed_rebuild_before=needed_before,
+              needs_rebuild=needs_rebuild, **row)
 
 
 def import_file(path, save_as=None):
@@ -339,6 +336,7 @@ def import_file(path, save_as=None):
         return error("import_failed", str(exc))
 
 
+@tool_guard("macro_failed")
 def run_macro(macro_path, module="", procedure="", apply=False):
     """Run a SolidWorks VBA macro (.swp/.swb). Dry-run validates the file only.
 
@@ -346,23 +344,18 @@ def run_macro(macro_path, module="", procedure="", apply=False):
     workaround scripts in 项目规划. Runs whatever the macro does with no
     sandboxing, so apply=True is required.
     """
-    try:
-        path = check_path_allowed(macro_path)
-        if not os.path.exists(path):
-            return error("bad_input", "file not found: %s" % path)
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in (".swp", ".swb"):
-            return error("bad_input", "expected a .swp/.swb macro, got %s" % ext)
-        if not apply:
-            return ok(dry_run=True, macro=path, module=module or None,
-                      procedure=procedure or None,
-                      message="Nothing ran. apply=True executes the macro.")
-        sw = get_sw()
-        result = sw.RunMacro(path, module or "main", procedure or "main")
-        # RunMacro return codes: 0 ok; -1 error; else the macro's own return.
-        return ok(action="macro_ran", macro=path, return_code=result,
-                  note="0 = success; negative codes are SolidWorks-side errors")
-    except PermissionError as exc:
-        return error("path_not_allowed", str(exc))
-    except Exception as exc:
-        return error("macro_failed", str(exc))
+    path = check_path_allowed(macro_path)
+    if not os.path.exists(path):
+        return error("bad_input", "file not found: %s" % path)
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".swp", ".swb"):
+        return error("bad_input", "expected a .swp/.swb macro, got %s" % ext)
+    if not apply:
+        return ok(dry_run=True, macro=path, module=module or None,
+                  procedure=procedure or None,
+                  message="Nothing ran. apply=True executes the macro.")
+    sw = get_sw()
+    result = sw.RunMacro(path, module or "main", procedure or "main")
+    # RunMacro return codes: 0 ok; -1 error; else the macro's own return.
+    return ok(action="macro_ran", macro=path, return_code=result,
+              note="0 = success; negative codes are SolidWorks-side errors")
