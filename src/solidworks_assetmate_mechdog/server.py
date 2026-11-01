@@ -426,14 +426,20 @@ def move_annotation(drawing_path: str, name: str, x_m: float, y_m: float,
 
 @mcp.tool()
 def set_dimension_position(drawing_path: str, name: str, x_m: float, y_m: float,
-                           save: bool = True) -> str:
+                           save: bool = True,
+                           position_m: list[float] | None = None) -> str:
     """Move ONE dimension to a sheet position in metres, by its reported name.
 
     P0-2: single-dimension counterpart to layout_dimensions' bulk auto-placement. Verifies
     the target is a dimension (not a note/GTOL), and reports value plus before/after
     positions. Use list_drawing_annotations first to get the `name`.
+
+    `position_m` disambiguates repeated names (a sheet with 19 dimensions all called D1 is
+    real). The implementation always supported it; the wrapper not forwarding it is what
+    made "move exactly one D1" impossible from the MCP side.
     """
-    return _json(layout.set_dimension_position(drawing_path, name, x_m, y_m, save=save))
+    return _json(layout.set_dimension_position(drawing_path, name, x_m, y_m,
+                                             save=save, position_m=position_m))
 
 
 @mcp.tool()

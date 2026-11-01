@@ -1593,6 +1593,111 @@ def assert_cut_line_placed_on_its_view():
     return "half in sheet metres from precise outline, line anchored to the view"
 
 
+def assert_tolerance_uses_metres():
+    """0.8.33 / N-2 — 0.1 mm rendered as ±100 because the value went in as millimetres.
+
+    `SetToleranceValues` takes metres. Measured 2026-11-01: 50 symmetric ±0.1 produced
+    "50 ±100" on the PDF while `applied: true` and the tolerance type read back correctly.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "add_dimension_tolerance")) or ""
+    assert "float(upper) / 1000.0" in body, (
+        "upper is still passed raw — SetToleranceValues takes metres")
+    assert "float(lower) / 1000.0" in body, "lower is still passed raw"
+    assert "rendered_text" in body, (
+        "no rendered_text: a 1000x unit error stays invisible because the numeric "
+        "readback is unaffected")
+    return "metres in, rendered_text out"
+
+
+def assert_unreadable_callout_text_is_kept():
+    """0.8.33 / #6 — on SW2026 GetText(0/1/2) is None for every callout.
+
+    v0.8.26 treated "no Ø in the text" as failure, so all 8 callouts on a fresh sheet were
+    created and then deleted: `created: 0 / failed: 8`. Unreadable is not invalid.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "add_hole_callouts")) or ""
+    assert "text_unreadable" in body, "the receipt cannot say the text was unreadable"
+    assert "if not has_diameter and not text_unreadable" in body, (
+        "an unreadable text still counts as a rejection — callouts get deleted again")
+    assert '"text_unreadable": text_unreadable' in body, (
+        "created rows do not carry the flag")
+    return "unreadable text kept, flagged, never deleted"
+
+
+def assert_wrapper_forwards_position_m():
+    """0.8.33 — the implementation supported position_m; the wrapper did not forward it.
+
+    Same drift as N2 (create_drawing/view_positions): a sheet with 19 dimensions called D1
+    could only move the first one, and the schema rejected the parameter outright.
+    """
+    server = _read("server.py")
+    index = server.index("def set_dimension_position(")
+    # Window has to reach past the docstring to the forwarding call.
+    segment = server[index:index + 2000]
+    assert "position_m: list[float] | None = None" in segment, (
+        "the wrapper still rejects position_m")
+    assert "position_m=position_m" in segment, (
+        "the wrapper does not forward position_m to the implementation")
+    return "wrapper forwards position_m"
+
+
+def assert_dedupe_uses_full_name():
+    """0.8.33 / R1 — 23 real dimensions were reported as 18 with duplicates_skipped=5.
+
+    The key was (view, name, position, value); SolidWorks reuses D1/D2 per sketch and equal
+    values are common, so distinct dimensions collapsed.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "verify_dimension_attachments")) or ""
+    assert "_annotation_dimension_full_name(ann, win)" in body, (
+        "the dedupe key is not the model full name")
+    assert 'tuple(row.get("position_m")' not in body, (
+        "the old (view, name, position, value) key is still in use")
+    return "dedupe by model full name"
+
+
+def assert_callout_text_carries_value():
+    """0.8.33 / R2 — callout rows read back as bare "Ø" / None for four rounds.
+
+    Also: SystemValue is not consistently radius or diameter (a printed Ø8 answered 4.0,
+    Ø15 answered 15.0), so the printed text wins and SystemValue is only a flagged fallback.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "list_drawing_annotations")) or ""
+    assert "text_was_bare_symbol" in body, "a bare Ø row is still left without a number"
+    assert "diameter_source" in body, (
+        "the receipt does not say whether the diameter came from text or from SystemValue")
+    assert '"radius_callout", "hole_callout_unverified"' in body, (
+        "radius/unverified callouts still skip the value branch")
+    return "bare symbols get the value, source reported"
+
+
+def assert_mojibake_is_repaired():
+    """0.8.33 / N-3 — feature names came back as ÂÝÎÆ¿××êÍ·Éî¶È (= 螺纹孔钻头深度).
+
+    Reported three rounds running. GB2312 bytes decoded as Latin-1 are losslessly reversible;
+    real Chinese fails `.encode("latin-1")` and must pass through untouched, which is what
+    makes a blanket call safe.
+    """
+    src = _read("sw_session.py")
+    node = _function_node(ast.parse(src), "fix_mojibake")
+    assert node is not None, "fix_mojibake is missing"
+    body = ast.get_source_segment(src, node) or ""
+    assert 'encode("latin-1")' in body and 'decode("gb2312")' in body, (
+        "the repair no longer round-trips through latin-1/gb2312")
+    assert "return text" in body, "no pass-through: real Chinese would be mangled"
+    drawing_src = _read("tools/drawing.py")
+    assert "fix_mojibake" in drawing_src, (
+        "ledger_missing still emits mojibake feature names")
+    return "lossless repair with a safe pass-through"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1659,6 +1764,12 @@ STATIC_REGRESSIONS = [
     ("0.8.30 duplicate dim unsupported", assert_duplicate_dimension_declared_unsupported),
     ("0.8.31 section line unsupported", assert_section_line_limitation_declared),
     ("0.8.32 cut line on view", assert_cut_line_placed_on_its_view),
+    ("0.8.33 tolerance metres", assert_tolerance_uses_metres),
+    ("0.8.33 callout text unreadable", assert_unreadable_callout_text_is_kept),
+    ("0.8.33 wrapper position_m", assert_wrapper_forwards_position_m),
+    ("0.8.33 dedupe full name", assert_dedupe_uses_full_name),
+    ("0.8.33 callout text value", assert_callout_text_carries_value),
+    ("0.8.33 mojibake repaired", assert_mojibake_is_repaired),
 ]
 
 

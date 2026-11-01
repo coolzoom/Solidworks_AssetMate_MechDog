@@ -6,7 +6,7 @@
 
 别的工具告诉你「生成了几张图」，它告诉你「台账 37 个尺寸里图上只找到 32 个、8 个尺寸挂不到几何上、0 个带公差，所以这张图只能算参考稿」。
 
-**能做的不只是尺寸**：孔标注、形位公差、表面粗糙度、标题栏、件号气泡、**原生 BOM 明细栏**、技术要求注记，都是走 SolidWorks 原生对象——明细栏会随装配更新，件号与行号对应。
+**能做的不只是尺寸**：孔标注、形位公差、表面粗糙度、标题栏、**原生 BOM 明细栏**、技术要求注记，都是走 SolidWorks 原生对象——明细栏会随装配更新，件号与行号对应。
 
 Windows + SolidWorks 2020+，纯 Python + COM，不需要编译 C# 插件。MCP 注册名：`Solidworks_AssetMate_MechDog`。
 
@@ -20,7 +20,7 @@ Windows + SolidWorks 2020+，纯 Python + COM，不需要编译 C# 插件。MCP 
 
 | 图纸 | 内容 |
 |---|---|
-| 装配图 | 3 视图 + **原生 BOM 明细栏**（门/箱体）+ 件号气泡 + 9 条技术要求 |
+| 装配图 | 3 视图 + **原生 BOM 明细栏**（门/箱体）+ 件号气泡（**界面手插**，见下）+ 9 条技术要求 |
 | 箱体零件图 | 4 视图 + 尺寸链 + 7 条技术要求（材料/折弯半径/喷塑） |
 | 箱体展开图 | 展平 + 下料尺寸 + 折弯线 |
 | 门零件图 / 展开图 | 同上 |
@@ -31,6 +31,8 @@ Windows + SolidWorks 2020+，纯 Python + COM，不需要编译 C# 插件。MCP 
 
 > 右下角明细栏是**原生 BOM**（`BomFeature` 可取，会随装配更新），不是画线拼的表格。
 > 件号 ① ② 与明细栏行号对应。
+>
+> **注意**：这两个气泡是**界面手工添加**的——`InsertBOMBalloon2` 需要 9 个必填参数、`InsertBalloon` 在 SW2024/SW2026 下都是 `DISP_E_UNKNOWNNAME`，所以没有对应的 MCP 工具，`check_capabilities` 里 `balloon` 标的是 `unsupported`。明细栏行号本身是正确的，手插时照抄即可。
 
 ### 箱体零件图
 
@@ -211,11 +213,16 @@ pending:   27/53 尺寸读不到关联
 | **形位公差框格第一格是文字，不是几何符号** | `SetFrameSymbols2` 传 `<MOD-FLAT-PAR>` 这类格式码只会被当字面文本，不会解析成 GD&T 符号；v0.8.20 起改写中文文字（如「位置度」）并用 `GetFrameSymbols2` 回读校验，写不进就删框报错 | 框格有、数值对、第一格可读；真正的几何符号仍需界面补 |
 | **孔标注只覆盖朝向观察者的孔边** | 同一孔的两个面只有正面能标，背面返回 null（实测 door.SLDPRT：Ø8/Ø15 成功，Ø6 背面 8 条全失败） | 记 `hidden_side`，用 Ø 尺寸补；或换视图 |
 | **`material_library` 按文件名查找不可靠** | 传绝对路径可用（UTF-16 已修）；按文件名在 PROGRAMDATA/APPDATA 下遍历可能漏 | 建议传完整路径 |
-| **A3 最多 3 个视图** | 剖视图 x 与父视图锁定，无法横向移开 | 钣金件拆两张图（结构 + 展开） |
+| **A3 最多 3 个视图** | 视图多了会互相挤占；剖视的强制对齐已可用 `set_view(break_alignment=True)` 解除（内部先 `IView.RemoveAlignment` 再写坐标） | 必要时拆两张图（结构 + 展开） |
 | **装配体拿不到包围盒** | `IAssemblyDoc` 没有 `GetPartBox`，组件 `GetBox` 在轻化下返回 None | 比例靠实测安全区推算 + 建完测量降档兜底 |
 | **尺寸跨视图去重需外部传值** | 图纸尺寸是投影长度，同一条边不同视图值不同 | 去重只能靠调用方给 `known_values` |
-| **`produce_drawing` 会多标尺寸** | 规划给"保留 N 个"，实际导入模型全部标记尺寸（无按值筛接口） | 返回 `dimension_gap` 说明差值，需人工删减 |
+| **`produce_drawing` 会多标尺寸** | 默认 `prune_to_plan=true` 已按规划删除多余尺寸；`dimension_filter` 全不匹配时一条不删 | 看 `dimension_gap.pruned_to_plan` 与 `filter_aborted` |
 | **图面利用率低** | 布局只保证不越界，不保证填满 | 视图偏小、留白多，需人工放大 |
+| **件号圆圈（BOM balloon）** | `InsertBOMBalloon2` 需 9 个必填参数；`InsertBalloon` 在 SW2024/SW2026 均 `DISP_E_UNKNOWNNAME` | 用 `add_note` 写文字 + `add_sheet_line` 画引线，或界面手插 |
+| **展开计算与校验（flat_pattern_calc）** | 工具不读 K 因子，展开由 SolidWorks 自己算 | 用 `flat_pattern_report` 声明依据，不要拿它做展开验证 |
+| **移动父视图时切割线跟随** | 四组接口都够不着图纸上的线（详见 com-quirks 第二十六节）；0.8.32 只修正了初始位置 | **先摆视图再建剖面**；已移过就删了重建 |
+| **把驱动尺寸补插到第二个视图** | `InsertModelAnnotations3` 是文档级幂等，参数改不出来 | 用 `list_drawing_edges` + `add_drawing_dimension(view_name=...)` 在该视图重新标注 |
+| **建模 / 特征创建（geometry_creation）** | 本工具只处理已有模型的出图，不做 CAD 建模 | 用 SolidWorks 或 solidpilot 类工具建模 |
 | **批量读图需逐张关闭** | SolidWorks 开 40+ 文档后任何新文件都打不开 | 批量脚本必须 `CloseDoc` |
 | **`model_clean` 不再阻断交付** | 本工具出图与自检，**明确不重建模型**；源模型 `needs_rebuild` 属模型侧状态，调用方在工具链内无法消除 | 0.8.23 起降为 pending 提示项，不再让 verdict 永远到不了「可制造」 |
 | **没有线程级硬超时** | pywin32 在拥有对象的 STA 线程上派发；把调用丢到工作线程再「超时放弃」会破坏 COM 公寓，而不是取消调用 | 改为「存活探针（18 ms，2 秒节流）+ 忙时退避重试 2 次 + 断线自动重连」，`ping` 可分辨"活着但忙"与"死了"；单次真正挂死仍会阻塞 |
@@ -226,7 +233,7 @@ pending:   27/53 尺寸读不到关联
 开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)——核心一条：**改完必须跑一次真实调用**。
 
 ```bash
-python tests/check_all.py     # 秒级：语法 + 结构 + 65 条历史回归
+python tests/check_all.py     # 秒级：语法 + 结构 + 71 条历史回归
 python tests/smoke.py         # 需 SolidWorks：行为层
 ```
 

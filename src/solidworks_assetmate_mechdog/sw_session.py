@@ -377,6 +377,25 @@ def call_method(obj, name, *args):
     raise last if last is not None else RuntimeError("call_method exhausted retries")
 
 
+def fix_mojibake(text):
+    """Recover GB2312 text that SolidWorks handed back decoded as Latin-1.
+
+    Feature names arrive as `ÂÝÎÆ¿××êÍ·Éî¶È` (= 螺纹孔钻头深度) — the GB2312 bytes were
+    decoded one byte at a time. Because those bytes are all Latin-1 printable, a lossless
+    re-encode is possible. Real Chinese fails at `.encode("latin-1")` and is returned
+    untouched, so this is safe to call on every string (reports asked for it three rounds
+    running, and mojibake in `keep_dimensions` also weakens `dimension_filter` matching).
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("gb2312")
+    except Exception:
+        return text
+    # Only accept it when the repair actually produced CJK.
+    return repaired if any("\u4e00" <= ch <= "\u9fff" for ch in repaired) else text
+
+
 def runtime_info():
     """Report WHICH copy of this package is actually running, not just its version.
 

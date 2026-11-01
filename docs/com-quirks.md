@@ -1322,3 +1322,46 @@ sm.CreateLine(pos[0] + offset, pos[1] - half, 0.0,
 
 **「移动父视图后跟随」仍不支持**：`SetLineInfo` 会把多段独立短线重排成一条折返线
 （实测两段被连成往返），所以只能保证**初始位置正确**，移动后仍需重建。
+
+## 二十八、公差单位 ×1000 与"读不到文字就删标注"（0.8.33）
+
+### `SetToleranceValues` 收米，代码传了毫米
+
+`add_dimension_tolerance(value_mm=50, tolerance_type="symmetric", upper=0.1)` 渲染成
+**"50 ±100"**——`0.1` 被当成 **0.1 米**。而回执一切正常：`applied: true`、
+`tolerance_type_readback: 4`。**数值对了、类型对了、只有图是错的。**
+
+这类错误只有两条防线：知道 API 的单位契约，或者在返回值里给**渲染出来的文本**。
+现在两条都有：传参 `/1000`，并新增 `rendered_text`（PDF 实测 `±0.10`）。
+
+教训：`applied: true` 只证明"调用没抛异常"，不证明"图对了"。
+凡是**写入数值**的工具，回执都该带一个从文档读回来的字符串。
+
+### SW2026 上 `GetText` 对所有孔标注返回 None
+
+v0.8.26 用「文本里有没有 Ø」作为孔标注的准入门槛。在 SW2026 上
+`GetText(0/1/2)` 对每一条 callout 都返回 `None`，于是 `has_diameter=False` →
+走 `not has_diameter` 分支 → `_discard()` 删除。
+
+结果：全新图纸 8 个孔，`created: 0 / failed: 8 / no_native_callout`——
+**能力从"标注不理想"退化成"标注不存在"**，而这恰好是 README 头部第一项能力。
+
+修法不是"再加一层校验"，而是换判据：
+
+```python
+text_unreadable = not str(text or "").strip()
+if radius_only:                                  # 文本明确以 R 开头才拒
+    _discard(...); continue
+if not has_diameter and not text_unreadable:     # 有文本但没 Ø 才拒
+    _discard(...); continue
+# 其余一律保留，created 行标 text_unreadable=True
+```
+
+**原则：缺证据 ≠ 反证据。** 读不到就打 `text_unreadable` 让调用方自己决定，
+不要替用户删掉已经建出来的东西。
+
+### 顺带：`SystemValue` 对 callout 不统一
+
+同一次调用里，印着 `Ø8` 的 callout `SystemValue` 是 **4.0（半径）**，
+印着 `Ø15` 的却是 **15.0（已经是直径）**。所以 `list_drawing_annotations` 现在
+**以文本里的数字为准**，取不到才回退 `SystemValue` 并标 `diameter_source`。

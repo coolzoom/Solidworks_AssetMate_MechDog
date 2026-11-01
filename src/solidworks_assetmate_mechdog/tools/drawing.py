@@ -3450,12 +3450,15 @@ def add_dimension_tolerance(drawing_path, value_mm, tolerance_type="bilateral",
                          "This dimension may not accept a tolerance (reference dimensions "
                          "and driven dimensions reject them).")
         if code != 0:
+            # `SetToleranceValues` takes METRES. Passing millimetres made 0.1 mm render as
+            # "±100" — a 1000x error that still reported applied:true and read back a valid
+            # tolerance type (measured 2026-11-01: 50 symmetric ±0.1 -> PDF shows "50 ±100").
             try:
-                dim.SetToleranceValues(float(upper), float(lower))
+                dim.SetToleranceValues(float(upper) / 1000.0, float(lower) / 1000.0)
             except Exception:
                 # Symmetric takes a single value on some builds.
                 try:
-                    dim.SetToleranceValues(float(upper), float(upper))
+                    dim.SetToleranceValues(float(upper) / 1000.0, float(upper) / 1000.0)
                 except Exception:
                     pass
         try:
@@ -3471,8 +3474,20 @@ def add_dimension_tolerance(drawing_path, value_mm, tolerance_type="bilateral",
             applied = int(dim.GetToleranceType)
         except Exception:
             pass
+        # The tolerance VALUE lives in a text slot, not in the numeric readback: a 1000x
+        # unit error looked perfect until the PDF was rendered. Report what it prints.
+        rendered_text = None
+        try:
+            for _slot in (1, 0, 2):
+                _candidate = dim.GetText(_slot)
+                if _candidate:
+                    rendered_text = str(_candidate)
+                    break
+        except Exception:
+            pass
         return drawing_ok(applied=True, saved=True, planned=planned,
-                          tolerance_type_readback=applied)
+                          tolerance_type_readback=applied,
+                          rendered_text=rendered_text)
     except (FileNotFoundError, ValueError) as exc:
         return error("bad_input", str(exc))
     except Exception as exc:
@@ -3675,7 +3690,8 @@ def list_drawing_annotations(drawing_path, view_name=None):
                         row["text"] = str(gtol.GetText(1))
                     except Exception:
                         pass
-                if kind in ("dimension", "hole_callout"):
+                if kind in ("dimension", "hole_callout", "radius_callout",
+                            "hole_callout_unverified"):
                     dimension_value = None
                     specific = None
                     try:
@@ -3684,6 +3700,33 @@ def list_drawing_annotations(drawing_path, view_name=None):
                         if dim is not None:
                             dimension_value = round(float(dim.SystemValue) * 1000, 3)
                             row["value_mm"] = dimension_value
+                            # A callout whose text is just "Ø" / "R" (or None) tells the
+                            # reader nothing, and the value is already on this row. Reports
+                            # hit this four times: radius_callout text=None, hole_callout
+                            # text="Ø" with no number.
+                            if kind in ("hole_callout", "radius_callout",
+                                        "hole_callout_unverified"):
+                                # `SystemValue` is NOT consistently radius or diameter for
+                                # callouts: measured on one sheet, a printed Ø8 answered 4.0
+                                # (radius) while Ø15 answered 15.0 (already diameter). So
+                                # trust the printed text when it carries a number, and only
+                                # fall back to SystemValue — flagged — when it does not.
+                                import re as _re
+
+                                _bare = str(row.get("text") or "").strip()
+                                _printed = _re.search(r"([0-9]+(?:\.[0-9]+)?)", _bare)
+                                if _printed:
+                                    row["diameter_mm"] = float(_printed.group(1))
+                                    row["diameter_source"] = "text"
+                                elif _bare in ("", "Ø", "⌀", "R"):
+                                    row["diameter_mm"] = round(float(dimension_value), 3)
+                                    row["diameter_source"] = "value_unverified"
+                                    _prefix = ("R" if (_bare == "R"
+                                                       or kind == "radius_callout")
+                                               else "Ø")
+                                    row["text"] = "%s%g" % (
+                                        _prefix, round(float(dimension_value), 3))
+                                    row["text_was_bare_symbol"] = True
                             try:
                                 row["tolerance_type"] = int(dim.GetToleranceType)
                             except Exception:
@@ -3946,8 +3989,11 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
                    blocking=False)
             # P1-3: a ratio cannot tell you WHAT is missing, and on a "must be repairable
             # from this drawing" job the missing five are the whole point.
+            from ..sw_session import fix_mojibake as _fix_mojibake
+
             ledger_missing = [
-                {"feature": row.get("feature"), "dimension": row.get("dimension"),
+                {"feature": _fix_mojibake(row.get("feature")),
+                 "dimension": _fix_mojibake(row.get("dimension")),
                  "value_mm": row.get("value_mm"),
                  "dimension_type": row.get("dimension_type")}
                 for row in (rec.get("unmatched_ledger") or [])
@@ -4100,9 +4146,14 @@ def verify_dimension_attachments(drawing_path, view_name=None):
                 # unique ones (11) — the three numbers described the same sheet and
                 # disagreed. A report caught this: "8+15=23 != 11".
                 raw_hits += 1
-                dedupe_key = (row.get("view"), row.get("name"),
-                              tuple(row.get("position_m") or ()),
-                              row.get("value_mm"))
+                # Identity of a driving dimension is its MODEL full name. The old key was
+                # (view, name, position, value): SolidWorks reuses D1/D2 per sketch and a
+                # sheet can hold many equal values, so distinct dimensions collapsed —
+                # measured 23 real dimensions reported as 18 with duplicates_skipped=5.
+                # `_annotation_dimension_full_name` already existed (eliminate_duplicates
+                # uses it); the fallback keeps unnamed annotations countable.
+                dedupe_key = (_annotation_dimension_full_name(ann, win)
+                              or (row.get("view"), row.get("name"), row.get("value_mm")))
                 if dedupe_key in seen_dims:
                     duplicates_skipped += 1
                     continue
@@ -4552,13 +4603,26 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
                 has_diameter = ("Ø" in str(text or "")) or ("MOD-DIAM" in text_upper) \
                     or text_upper.startswith("M") or " X " in text_upper
                 radius_only = text_upper.startswith("R") and not has_diameter
-                if radius_only or not has_diameter:
+                # v0.8.33: an UNREADABLE text is NOT evidence of a bad callout. On SW2026
+                # `GetText(0/1/2)` returns None for every callout, so treating "no Ø found"
+                # as failure deleted all of them (measured: 8 created -> 0 on the sheet).
+                # Only reject on POSITIVE evidence — text that explicitly starts with R.
+                text_unreadable = not str(text or "").strip()
+                if radius_only:
                     _discard(dim)
                     failed.append({"view": view.Name,
                                    "diameter_mm": round(chosen["radius_m"] * 2000, 2),
                                    "reason": "not a hole callout (text=%r, likely an outer arc)"
                                              % (text,),
                                    "z": chosen["z"], "radius_only": True})
+                    continue
+                if not has_diameter and not text_unreadable:
+                    _discard(dim)
+                    failed.append({"view": view.Name,
+                                   "diameter_mm": round(chosen["radius_m"] * 2000, 2),
+                                   "reason": "callout text carries no diameter (text=%r)"
+                                             % (text,),
+                                   "z": chosen["z"]})
                     continue
                 # P1-1: the printed number must agree with the measured edge.
                 expected_d = round(chosen["radius_m"] * 2000, 2)
@@ -4586,6 +4650,9 @@ def add_hole_callouts(drawing_path, view_name=None, min_diameter_mm=0.0,
                     "diameter_mm": round(chosen["radius_m"] * 2000, 2),
                     "is_hole_callout": is_hole,
                     "text": text,
+                    # Same signal the earlier rejection path needs: keep the callout but say
+                    # the text could not be read, so the caller decides on the geometry.
+                    "text_unreadable": text_unreadable,
                     "z": chosen["z"],
                     "anchor_m": [round(callout_point[0], 4), round(callout_point[1], 4)],
                     "position_m": position_m,
