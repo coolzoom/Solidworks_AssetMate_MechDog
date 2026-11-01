@@ -1546,6 +1546,33 @@ def assert_duplicate_dimension_declared_unsupported():
     return "declared unsupported with a working workaround"
 
 
+def assert_section_line_limitation_declared():
+    """0.8.31 / P0-3 — the cut line cannot be moved from the API, so say so.
+
+    Measured 2026-11-01: GetLineInfo is model-space and unchanged after moving the view;
+    SetLineInfo writes the section PLANE not the drawn line; the view's sketch is unreachable
+    (GetSketches does not exist under late binding).
+    """
+    caps = _read("tools/capabilities.py")
+    assert '"section_line_follows_view"' in caps, (
+        "the limitation is undeclared — callers keep trying to move the line")
+    index = caps.index('"section_line_follows_view"')
+    segment = caps[index:index + 1800]
+    assert '"unsupported"' in segment, "it is not marked unsupported"
+    assert "GetLineInfo" in segment and "SetLineInfo" in segment, (
+        "the entry does not name the interfaces that were tried")
+    assert "GetSketches" in segment, (
+        "it does not record that the view sketch is unreachable")
+    assert "先" in segment and "重建" in segment, (
+        "no actionable workaround (place views first, then rebuild the section)")
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "add_section_view")) or ""
+    assert "do not follow a moved parent view" in body, (
+        "add_section_view does not warn about the cut line")
+    return "unsupported, four interfaces named, actionable workaround"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1610,6 +1637,7 @@ STATIC_REGRESSIONS = [
     ("0.8.28 view label dodge", assert_set_view_dodges_label),
     ("0.8.29 break alignment", assert_set_view_break_alignment),
     ("0.8.30 duplicate dim unsupported", assert_duplicate_dimension_declared_unsupported),
+    ("0.8.31 section line unsupported", assert_section_line_limitation_declared),
 ]
 
 

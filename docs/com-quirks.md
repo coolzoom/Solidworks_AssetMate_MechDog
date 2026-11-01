@@ -1244,3 +1244,33 @@ add_drawing_dimension(view_name="工程图视图2", edge_index=0)
 
 结论写进 `check_capabilities` 的 `duplicate_dimension_to_view`（`unsupported`），
 避免下一个使用者再花一轮去试参数。
+
+## 二十六、剖面切割线：三个接口都够不着那张图上的线（0.8.31）
+
+想让"移动父视图时切割线跟着走"，试完四组接口，都不行：
+
+| 接口 | 结果 |
+|---|---|
+| `IDrSection.GetLineInfo` | 12 个 double，**模型坐标**（±1.03 m，而 A3 只有 420 mm）。移动视图前后**完全相同** |
+| `IDrSection.SetLineInfo(VARIANT 数组)` | 能写，返回 `True`——但改的是**模型空间的剖切平面**，等于把剖面切到别的地方，不是移动图上那条线 |
+| `IView.GetSectionLineInfo2` | 只读，且同样返回模型坐标（值 -1.0347 与 `GetLineInfo` 一致） |
+| `IView.GetSketchCount` / `GetSketches` | 晚绑定下**不存在**（`DISP_E_UNKNOWNNAME`），触达不了图纸上的草图 |
+
+`SetLineInfo` 的正确签名在文档里：**只接受一个参数**，是 VARIANT 数组，
+每段 6 个 double（起点 xyz + 终点 xyz），多段的公共点必须保持一致。
+之前按 6/7/8/10/12 个散参数传，全都报「无效的参数数目」——那是参数形式错，不是方法不存在。
+
+### 顺带发现更基本的问题
+
+渲染核对（移动前后各导一次 PDF）显示：`add_section_view` 建出来的切割线
+**在图纸上的位置与父视图并不重合**——父视图在左上角，线飘在图纸中部。
+也就是说「移动后脱离」之前，它就已经没压对地方。
+
+原因是切割线用 `ISketchManager.CreateLine` 画在草图里，而坐标基准（图纸绝对 vs 视图局部）
+在晚绑定下无法验证（草图对象拿不到）。修它需要重定坐标基准，属独立一轮。
+
+### 现在的建议流程
+
+1. **先把视图摆到位**（`place_views` / `set_view`），最后一步才 `add_section_view`
+2. 已经移过 → `delete_view` 删剖面重建（代价：该视图上的尺寸会丢）
+3. 每次改完 `export_drawing` + `render_drawing` 目视核对线是否压在父视图上

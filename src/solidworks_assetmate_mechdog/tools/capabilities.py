@@ -194,6 +194,28 @@ CAPABILITIES = [
                      "引线自动引出），失败 8 个全为 Ø6 背面边（z=6.0）"),
     },
     {
+        "id": "section_line_follows_view",
+        "status": "unsupported",
+        "summary": "移动父视图时让剖面切割线跟着走",
+        "why": ("**API 层面无解**（2026-11-01 实测四组接口）。剖切线只有三种触达方式，都不对："
+                "① `IDrSection.GetLineInfo` 返回**模型坐标**（±1.03 m，远超 A3 的 420 mm，"
+                "不是图纸坐标），移动视图后数值不变；"
+                "② `IDrSection.SetLineInfo(VARIANT 数组)` 确实可写（返回 True），"
+                "但改的是**模型空间的剖切平面**——等于把剖面切到别的位置，不是让线跟随视图；"
+                "③ `IView.GetSectionLineInfo2` 只读且同样是模型坐标；"
+                "④ `IView.GetSketchCount` / `GetSketches` 在晚绑定下**不存在**，"
+                "无法触达图纸上的那条线。"
+                "另外渲染核对发现更基本的问题：`add_section_view` 建出来的切割线"
+                "**在图纸上的位置与父视图并不重合**（父视图在左上，线在图纸中部），"
+                "所以「移动后脱离」之前就已经偏了。"),
+        "workaround": ("**先把视图摆到位，再建剖面**（`add_section_view` 是最后一步）。"
+                       "已经移过就 `delete_view` 删掉剖面再重建——代价是该视图上的尺寸会丢，"
+                       "所以务必先定死布局。每次改动后用 `export_drawing` + `render_drawing` "
+                       "目视核对切割线是否压在父视图上"),
+        "evidence": ("2026-11-01 履带轮 P05：移动父视图 +30 mm 前后各渲染一次，"
+                     "两张图上切割线坐标一致（未跟随）；`GetLineInfo` 12 个值前后完全相同"),
+    },
+    {
         "id": "duplicate_dimension_to_view",
         "status": "unsupported",
         "summary": "把同一条驱动尺寸补插到第二个视图（局部放大）",

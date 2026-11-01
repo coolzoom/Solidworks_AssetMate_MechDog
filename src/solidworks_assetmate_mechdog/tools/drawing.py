@@ -2834,6 +2834,12 @@ def add_section_view(drawing_path, view_name=None, orientation="horizontal",
                                the tool negates it internally. Measured: -0.012 -> 59x80
                                (correct cross-section), +0.012 -> 14x50 (wrong plane).
 
+    **Cut lines do not follow a moved parent view, and cannot be moved afterwards**
+    (measured 2026-11-01: `IDrSection.GetLineInfo` is model-space and does not change when the
+    view moves; `SetLineInfo` writes the section PLANE, not the drawn line; the view's sketch
+    is unreachable). Place the parent view FIRST, then create the section, then never move it —
+    or delete and rebuild. See check_capabilities `section_line_follows_view`.
+
     Both orientations take `offset_m` as model-space distance from the part centre, i.e.
     `offset_m = (target_model_coordinate - centre) * scale` in SHEET metres.
 
