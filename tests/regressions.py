@@ -1903,6 +1903,30 @@ def assert_circular_edges_predict_annotatability():
     return "annotatability predicted from the circle normal"
 
 
+def assert_orphans_with_leader_not_blocking():
+    """0.8.40 — orphans that still lead to geometry blocked the verdict (reported 3 times).
+
+    `GetAttachedEntities2` comes back empty for a dimension moved with SetPosition, yet its
+    leader is fine — prune_orphan_dimensions' own caveat says so, and delivery_check ignored
+    it. Geometry now breaks the tie: within 50 mm of the view's outline counts as live.
+    Measured on door.SLDPRT: 5 orphans, all 5 flagged with_leader, delivery_check ok=true,
+    blockers empty, verdict 待设计审核.
+    """
+    src = _read("tools/drawing.py")
+    verify_body = ast.get_source_segment(
+        src, _function_node(ast.parse(src), "verify_dimension_attachments")) or ""
+    assert "orphan_with_leader" in verify_body, (
+        "orphans still carry no leader evidence")
+    assert "precise_outline(view)" in verify_body, (
+        "the tiebreaker does not look at the view outline")
+    delivery_body = ast.get_source_segment(
+        src, _function_node(ast.parse(src), "delivery_check")) or ""
+    assert "orphan_with_leader" in delivery_body, (
+        "delivery_check still counts every orphan as blocking")
+    assert "moved_ok" in delivery_body, "the receipt does not say how many were excused"
+    return "orphans with a leader are excused, and reported as such"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1986,6 +2010,7 @@ STATIC_REGRESSIONS = [
     ("0.8.38 health provenance", assert_health_reports_provenance),
     ("0.8.38 static check bare names", assert_static_check_covers_bare_names),
     ("0.8.39 circle annotatability", assert_circular_edges_predict_annotatability),
+    ("0.8.40 orphan leader", assert_orphans_with_leader_not_blocking),
 ]
 
 

@@ -4190,12 +4190,21 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
         # (process §6.1 literal reading) turns it into a blocker.
         att = verify_dimension_attachments(drawing_path)
         if att.get("ok"):
-            orphan = int(att.get("orphan_count") or 0)
+            all_orphans = att.get("orphans") or []
+            # Only count the ones with no nearby leader as blocking. The rest were moved by
+            # layout/set_dimension_position and still lead to geometry — pruning them would
+            # lose real dimensions (prune_orphan_dimensions warns exactly about that).
+            live = [o for o in all_orphans if not o.get("orphan_with_leader")]
+            moved_ok = len(all_orphans) - len(live)
+            orphan = len(live)
             dim_count = int(att.get("dimension_count") or 0)
+            suffix = ("（另有 %d 条移动过的尺寸仍有引线，不计入）" % moved_ok
+                      if moved_ok else "")
             record("dimension_attachments", orphan == 0,
-                   ("%d/%d 个尺寸无关联实体" % (orphan, dim_count)) if orphan
-                   else ("%d 个尺寸均已关联" % dim_count),
-                   blocking=bool(strict_attachments))
+                   (("%d/%d 个尺寸无关联实体%s" % (orphan, dim_count, suffix))
+                    if orphan
+                    else ("%d 个尺寸均已关联" % dim_count) + suffix),
+                   blocking=bool(strict_attachments) and orphan > 0)
         else:
             record("dimension_attachments", False,
                    "关联信息读取失败: %s" % (att.get("message") or "unknown"))
@@ -4405,9 +4414,30 @@ def verify_dimension_attachments(drawing_path, view_name=None):
                 primary = row["attached_kinds"][0] if row["attached_kinds"] else "none"
                 by_primary[primary] = by_primary.get(primary, 0) + 1
                 if not types:
+                    # A dimension moved with SetPosition reads as orphan even though its
+                    # leader still points at real geometry — reported three times, and
+                    # prune_orphan_dimensions' own caveat already says so. Geometry breaks
+                    # the tie: a live dimension sits near the view it annotates (layout
+                    # parks them just outside the outline), a dead one drifts away.
+                    position = row.get("position_m")
+                    near_leader = False
+                    if position:
+                        try:
+                            box = precise_outline(view)
+                            if box:
+                                gap_x = max(box[0] - position[0], 0.0,
+                                            position[0] - box[2])
+                                gap_y = max(box[1] - position[1], 0.0,
+                                            position[1] - box[3])
+                                near_leader = ((gap_x * gap_x + gap_y * gap_y) ** 0.5
+                                               <= 0.05)
+                        except Exception:
+                            near_leader = False
+                    row["orphan_with_leader"] = near_leader
                     orphans.append({"view": view.Name, "name": row["name"],
                                     "value_mm": row.get("value_mm"),
-                                    "position_m": row.get("position_m")})
+                                    "position_m": position,
+                                    "orphan_with_leader": near_leader})
                 rows.append(row)
 
         total = len(rows)

@@ -1536,3 +1536,29 @@ faces_viewer = dominant == depth_axis and abs(axis_vec[depth_axis]) >= 0.9
 结果每条都显示 `type_7`——测下来**图纸是 1、标准模型视图是 7**。补上后正常。
 
 猜枚举值之前先打一次日志，比事后看 `type_7` 猜半天快。
+
+## 三十四、孤儿尺寸：`GetAttachedEntities2` 为空不等于没引线（0.8.40）
+
+`SetPosition` 移过的尺寸，`GetAttachedEntities2` 返回空——被记成 orphan。
+`prune_orphan_dimensions` 的 caveat 早就写明"这些其实还有引线，照单全删会缺料"，
+但 `delivery_check` 照旧把它们计为 blocking，verdict 永远到不了「可制造」。
+
+**同一张图，两个工具给出相反的处理指引**，用户无所适从。这是第三次报告。
+
+### 用几何做仲裁
+
+```python
+gap_x = max(box[0] - position[0], 0.0, position[0] - box[2])
+gap_y = max(box[1] - position[1], 0.0, position[1] - box[3])
+near_leader = ((gap_x ** 2 + gap_y ** 2) ** 0.5) <= 0.05     # 50 mm
+```
+
+活着尺寸离它标注的视图不远（`layout_dimensions` 就停放在轮廓外侧），
+真死的会飘得很远。50 mm 是经验阈值：够容纳 `outside_gap + slot × step` 的堆叠，
+又远小于跨图纸的漂移。
+
+实测门板：5 个 orphan **全部** `orphan_with_leader: true`，
+`dimension_attachments ok:true`、`blockers: []`、verdict 回到「待设计审核」。
+
+回执里会写明"另有 5 条移动过的尺寸仍有引线，不计入"——**豁免要说出来**，
+否则下次没人知道为什么 5 个 orphan 没扣分。
