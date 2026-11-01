@@ -1434,3 +1434,32 @@ scored.append((abs(extent[a] - width) + abs(extent[b] - height), (a, b)))
 所以这不是「一行能修」的问题，登记为 `hole_callout_text_slots`（`partial`）：
 通孔正常，带深度的孔会粘连，workaround 是改用 `add_drawing_dimension` 或人工改一次文字。
 回执里 `text_source=SetText_depth_may_trail` 就是这条限制的标记。
+
+## 三十一、假脏标记、假尺寸、真空隙（0.8.37）
+
+### 工程图操作会给模型打 `NeedsRebuild2`
+
+删一条标注，模型没动，`model.Extension.NeedsRebuild2` 却变成 `True`。
+`delivery_check` 把它记成 `needs_rebuild`，verdict 从「待设计审核」掉到「仅供参考/未完成」——
+一个调用方在这个工具集里**永远清不掉**的阻塞项。
+
+修法：读到脏就**先强制重建一次再读**。真改动重建后仍在，工程图引起的会消失。
+实测：删标注后 `needs_rebuild` 消失，剩下的 `suppressed_features` 是门板真有的压缩特征。
+
+### 错的边也会给出"合理"的尺寸
+
+`AddDimension2` 只要求"当前有选中的实体"，不校验**选中的是不是你以为的那条**。
+反馈里 `edge_index=71`（Ø36 分度圆弧段）量出了 Ø46 外圆的 `R23` —— 一个看起来完全正常的错误值。
+
+便宜的判据是**关联实体**：建完读 `IDisplayDimension.GetAnnotation` 的
+`GetAttachedEntityTypes`，为空说明这次选择根本没落上，撤销并报 `edge_mismatch`。
+比"比对数值"便宜，也不会被"巧合相等"骗过。
+
+### 去重保留"首次出现"，剖视图因此永远是空的
+
+`eliminate_duplicates` 按模型 `FullName` 保留第一条，而插入顺序是**主视图在前**，
+所以两个剖视图上的副本全被删掉（实测 83 插入 → 删 44 → 剖视 0 尺寸）。
+而深度、内腔这类尺寸**只有剖视能承载**，`ledger_missing` 随即报 7 条缺料。
+
+现在的 advisory 把这件事写清楚了，并给出两条出路：
+`eliminate_duplicates=False`（全留，自己删），或 `dimension_filter`（精确保留）。

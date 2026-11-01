@@ -282,6 +282,19 @@ def build_feature_ledger(model_path, include_faces=True, config=None):
 
         try:
             needs_rebuild = bool(model.Extension.NeedsRebuild2)
+            if needs_rebuild:
+                # A DRAWING edit (add/move/delete annotation) sets this flag on the
+                # referenced model without any model change, and the doubt then pulls the
+                # delivery verdict down for a defect that does not exist (reported
+                # 2026-11-01 against an untouched model). Force one rebuild and re-read:
+                # a real model change survives it, a drawing-induced flag does not.
+                try:
+                    from ..sw_session import call_method as _rebuild_once
+
+                    _rebuild_once(model, "EditRebuild3")
+                    needs_rebuild = bool(model.Extension.NeedsRebuild2)
+                except Exception:
+                    pass
         except Exception:
             needs_rebuild = None
         if needs_rebuild:

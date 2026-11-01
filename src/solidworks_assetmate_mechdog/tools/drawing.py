@@ -1352,6 +1352,12 @@ def auto_dimension(drawing_path, all_views=True, include_unmarked=False, elimina
         if dedupe_failed:
             notes.append("%d 条重复尺寸删除失败，见 dedupe_failed；可用 "
                          "delete_dimensions 按视图兜底。" % len(dedupe_failed))
+        if eliminate_duplicates and removed:
+            notes.append(
+                "去重按模型 FullName 保留**首次出现**（插入顺序主视图在前），"
+                "所以剖视/局部视图上的同源副本会被删掉——深度类尺寸可能因此无处安放"
+                "（实测 83 插入 → 删 44，两个剖视 0 尺寸）。需要剖视承载尺寸时，"
+                "改 eliminate_duplicates=False，或用 dimension_filter 精确保留。")
         if total > 30:
             notes.append(
                 "本图 %d 个尺寸；100 张真实工程图实测平均 14 个（中位 11）。"
@@ -2652,6 +2658,27 @@ def add_drawing_dimension(drawing_path, x=None, y=None, value=None, offset_x=0.0
                 "The entity may not be dimensionable (e.g. a construction line or a "
                 "silhouette that already has a driver).",
             )
+        # A wrong edge still yields a dimension — it just measures something else (report:
+        # edge_index 71 pointed at a Ø36 arc and the tool produced R23 of the Ø46 outline,
+        # a "plausible" wrong value nobody would question). A dimension attached to nothing
+        # is the cheap signal that the selection did not take.
+        if edge_index is not None:
+            try:
+                _ann = _call_method(display_dim, "GetAnnotation")
+                _types = list(_ann.GetAttachedEntityTypes or ())
+                if not _types:
+                    doc.ClearSelection2(True)
+                    try:
+                        _call_method(doc, "EditDelete")
+                    except Exception:
+                        pass
+                    return error(
+                        "edge_mismatch",
+                        "Dimension at edge_index=%s attached to no geometry" % edge_index,
+                        "The indexed edge and the selected edge disagree. Re-read the "
+                        "indices with list_drawing_edges, or pass x/y instead.")
+            except Exception:
+                pass
         dim = display_dim.GetDimension2(0)
         applied = None
         try:

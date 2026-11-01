@@ -1760,6 +1760,56 @@ def assert_callout_depth_limit_declared():
     return "slot limit declared with a workaround"
 
 
+def assert_model_clean_rechecks_after_rebuild():
+    """0.8.37 — a drawing edit marks the referenced model "needs rebuild".
+
+    Measured 2026-11-01: after deleting one annotation, delivery_check reported
+    model_clean=false / needs_rebuild on a model nobody had changed, dragging the verdict
+    to 仅供参考/未完成. One forced rebuild clears a spurious flag and keeps a real one.
+    """
+    src = _read("tools/ledger.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "build_feature_ledger")) or ""
+    assert "EditRebuild3" in body, (
+        "needs_rebuild is trusted on the first read — a drawing-induced flag blocks the verdict")
+    assert "_rebuild_once(model" in body or "call_method(model" in body, (
+        "the rebuild is not actually invoked on the model")
+    assert body.count("NeedsRebuild2") >= 2, (
+        "the flag is not re-read after the rebuild")
+    return "needs_rebuild re-read after one rebuild"
+
+
+def assert_dimension_rejects_unattached():
+    """0.8.37 — a wrong edge still produces a dimension, just of something else.
+
+    Report: edge_index 71 (a Ø36 arc) came out as R23 of the Ø46 outline — a plausible wrong
+    value. A dimension attached to nothing is the cheap signal that selection did not take.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "add_drawing_dimension")) or ""
+    assert "edge_mismatch" in body, "an unattached dimension is still reported as ok"
+    assert "GetAttachedEntityTypes" in body, (
+        "the attachment is never checked after AddDimension2")
+    assert "EditDelete" in body, "the bad dimension is left on the sheet"
+    return "unattached dimension rejected and removed"
+
+
+def assert_dedupe_warns_about_sections():
+    """0.8.37 — dedupe keeps the FIRST occurrence, so section views lose every copy.
+
+    Measured: 83 inserted -> 44 removed, both section views left with 0 dimensions, and the
+    depth-only features had nowhere to live.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "auto_dimension")) or ""
+    assert "首次出现" in body, (
+        "the advisory does not explain which copy survives dedupe")
+    assert "剖视" in body, "it does not warn that section views can end up empty"
+    return "dedupe advisory names the section-view consequence"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1835,6 +1885,9 @@ STATIC_REGRESSIONS = [
     ("0.8.34 axis map scaled", assert_axis_map_scales_to_sheet),
     ("0.8.35 single callout exact circle", assert_single_callout_matches_exact_circle),
     ("0.8.36 callout depth limit", assert_callout_depth_limit_declared),
+    ("0.8.37 model clean recheck", assert_model_clean_rechecks_after_rebuild),
+    ("0.8.37 dimension attachment", assert_dimension_rejects_unattached),
+    ("0.8.37 dedupe section warning", assert_dedupe_warns_about_sections),
 ]
 
 
