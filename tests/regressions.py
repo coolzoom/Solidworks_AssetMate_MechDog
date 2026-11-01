@@ -1810,6 +1810,76 @@ def assert_dedupe_warns_about_sections():
     return "dedupe advisory names the section-view consequence"
 
 
+def assert_gitignore_excludes_test_tree():
+    """0.8.38 — zip/PNG/JPG/CSV under 测试用例/ were tracked and published (4 rounds).
+
+    The CAD-extension rules never covered them, so 7 binaries (4.1 MB) sat in a public repo
+    while README claimed the tree was local-only.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".gitignore"), encoding="utf-8") as handle:
+        ignored = handle.read()
+    assert "测试用例/" in ignored, (
+        "the test tree is not excluded as a whole — zip/png/jpg/csv slip past the CAD rules")
+    return "whole test tree ignored"
+
+
+def assert_call_method_defined_once():
+    """0.8.38 — two copies of call_method drifted (reported four rounds).
+
+    bom_native had its own; the retry/classification logic only ever landed in sw_session.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src_dir = os.path.join(root, "src", "solidworks_assetmate_mechdog")
+    definitions = []
+    for dirpath, _dirs, files in os.walk(src_dir):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                        and node.name == "call_method":
+                    definitions.append(os.path.relpath(path, src_dir))
+    assert len(definitions) == 1, "call_method is defined in %s" % definitions
+    return "one definition: %s" % definitions[0]
+
+
+def assert_health_reports_provenance():
+    """0.8.38 — health_check never said which package it was running (3 rounds).
+
+    With several editable installs on one machine that is the only question that matters.
+    """
+    src = _read("sw_session.py") if False else None  # keep the helper signature honest
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "src", "solidworks_assetmate_mechdog",
+                          "sw_session.py"), encoding="utf-8") as handle:
+        body = handle.read()
+    index = body.find("def health(")
+    assert index > 0, "sw_session.health is missing"
+    segment = body[index:index + 2200]
+    for key in ("package_path", "package_version", "python_executable"):
+        assert key in segment, "health does not report %s" % key
+    return "health reports path / version / interpreter"
+
+
+def assert_static_check_covers_bare_names():
+    """0.8.38 — static_check only validated name.attribute, not bare names.
+
+    That is exactly how _EDGE_CACHE died unnoticed: the module imported fine, so only smoke
+    could have caught it.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "tests", "static_check.py"), encoding="utf-8") as handle:
+        body = handle.read()
+    assert "def check_bare_names" in body, "static_check still ignores bare names"
+    assert "problems.extend(check_bare_names(" in body, (
+        "the bare-name check exists but is never called")
+    return "static_check fails on undefined bare names"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1888,6 +1958,10 @@ STATIC_REGRESSIONS = [
     ("0.8.37 model clean recheck", assert_model_clean_rechecks_after_rebuild),
     ("0.8.37 dimension attachment", assert_dimension_rejects_unattached),
     ("0.8.37 dedupe section warning", assert_dedupe_warns_about_sections),
+    ("0.8.38 test tree ignored", assert_gitignore_excludes_test_tree),
+    ("0.8.38 call_method once", assert_call_method_defined_once),
+    ("0.8.38 health provenance", assert_health_reports_provenance),
+    ("0.8.38 static check bare names", assert_static_check_covers_bare_names),
 ]
 
 

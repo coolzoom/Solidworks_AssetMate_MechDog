@@ -1463,3 +1463,39 @@ scored.append((abs(extent[a] - width) + abs(extent[b] - height), (a, b)))
 
 现在的 advisory 把这件事写清楚了，并给出两条出路：
 `eliminate_duplicates=False`（全留，自己删），或 `dimension_filter`（精确保留）。
+
+## 三十二、仓库卫生：四轮挂账一次清（0.8.38）
+
+### `.gitignore` 只挡 CAD 扩展名，挡不住 zip/png/jpg/csv
+
+规则里列了 `*.SLDPRT` / `*.STEP` 等，于是 `测试用例/` 下的 **zip、PNG、JPG、CSV** 一路绿灯，
+7 个文件 4.1 MB 进了公开仓库——而 README 写着"仓库不含测试模型"。
+
+改成**整树排除** `测试用例/`，再用 `git rm --cached -r` 移出索引。
+**不改写历史**（`filter-repo` 要 force push），本地文件一个没动。
+
+### smoke 缺模型时只说"missing"
+
+clone 下来跑 `python tests/smoke.py` 得到一行 `missing test model: ...` 和 `exit 2`，
+没有任何下一步。现在会列出所需的三样东西（零件 / 装配体 / 钣金件）并给出
+`--part` / `--assembly` 的用法示例——仓库本来就不带模型，能指到本机模型就够了。
+
+### `call_method` 有两份
+
+`bom_native.py` 自己写了一份，`sw_session.py` 一份。四轮反馈后才统一——
+代价是**重试与错误分类逻辑只长在 `sw_session` 那份上**，`bom_native` 的那条路径
+永远拿不到桥接自愈。现在只留一处。
+
+### `health_check` 不说自己在跑哪个包
+
+多份 editable 安装并存时，"MCP 连的是哪个版本"是唯一重要的信息。补
+`package_path` / `package_version` / `python_executable`。
+
+### `static_check` 只看 `name.attribute`
+
+裸名字（模块级常量、缓存）不在它的视野里。`_EDGE_CACHE` 被一次合并吞掉后，
+模块仍然 import 成功，只有跑那条路径才会炸——**秒级防线当时给的是绿灯**。
+
+现在 `check_bare_names()` 遍历每个模块的顶层函数，把 `ast.Name`（Load）逐个对
+`imports ∪ 模块级定义 ∪ 参数 ∪ 局部 ∪ 内建 ∪ dunder` 求解。第一版漏了**嵌套函数的参数**，
+99 个误报；补上 `ast.arg` 与 `global` 后归零。

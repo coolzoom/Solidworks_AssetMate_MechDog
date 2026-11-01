@@ -29,13 +29,9 @@ ANCHOR_TOP_LEFT = 1
 COLUMN_TYPE_QUANTITY = 203
 
 
-def call_method(obj: Any, name: str, *args: Any) -> Any:
-    """Invoke a COM method explicitly as DISPATCH_METHOD."""
-    ole = obj._oleobj_
-    dispid = ole.GetIDsOfNames(name)
-    if args:
-        return ole.Invoke(dispid, 0, pythoncom.DISPATCH_METHOD, True, *args)
-    return ole.Invoke(dispid, 0, pythoncom.DISPATCH_METHOD, True)
+# One definition, in sw_session (reports caught this duplicated for four rounds: two copies
+# drift, and the retry/classification logic only ever landed in one of them).
+from ..sw_session import call_method  # noqa: E402,F401
 
 
 def set_column_hidden(table: Any, index: int, hidden: bool) -> None:

@@ -152,7 +152,21 @@ def health(deep=False):
 
     `deep=True` also touches ActiveDoc, which is where a stale pointer usually shows up.
     """
-    state = {"sw_version": None, "active_doc": None, "reconnected": False, "error": None}
+    # Provenance first: with several editable installs on one machine, "which package is
+    # this MCP actually running" is the only question that matters (asked for three rounds).
+    import sys as _sys
+
+    try:
+        import solidworks_assetmate_mechdog as _pkg
+
+        _package_path = getattr(_pkg, "__file__", None)
+        _package_version = getattr(_pkg, "__version__", None)
+    except Exception:
+        _package_path, _package_version = None, None
+    state = {"sw_version": None, "active_doc": None, "reconnected": False, "error": None,
+             "package_path": _package_path,
+             "package_version": _package_version,
+             "python_executable": _sys.executable}
     try:
         app = get_sw()
         state["sw_version"] = str(app.RevisionNumber)

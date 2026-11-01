@@ -118,7 +118,21 @@ def main():
 
     for path in (args.assembly, args.part):
         if not os.path.exists(path):
+            # A bare "missing" left clone users with nothing to act on (reported twice).
+            # 测试用例/ is local-only by design, so say what is needed and how to point
+            # the run at any model the machine already has.
             print("missing test model: %s" % path)
+            print("")
+            print("测试用例/ 是本地目录，.gitignore 已整树排除——仓库里没有测试模型。")
+            print("跑 smoke 需要三样东西（任意尺寸都可以）：")
+            print("  1. 一个零件   --part     默认 测试用例/履带-rebuild/P05_karetku.SLDPRT")
+            print("  2. 一个装配体 --assembly 默认 测试用例/监视器显示器固定支架-rebuild/"
+                  "装配体_显示器固定支架.SLDASM")
+            print("  3. 一个钣金件（用于展开/孔标注用例），放到 测试用例/"
+                  "electric panel box配电箱3D数模图纸 Solidworks设计/")
+            print("把本机已有的模型路径传进来即可，例如：")
+            print("  python tests/smoke.py --part D:/models/any.SLDPRT "
+                  "--assembly D:/models/any.SLDASM")
             return 2
 
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")

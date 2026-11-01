@@ -33,6 +33,11 @@ Thumbs.db
 .env
 *.token
 
+# Test fixtures are LOCAL-ONLY (README says so, and the CAD rules above only cover model
+# files). zip / PNG / JPG / CSV slipped through and got published — four rounds of reports.
+# Whole tree on purpose: nothing under 测试用例/ belongs in the package.
+测试用例/
+
 # Local handover materials (contains its own git repo; not published)
 recolor-GitHub-交接/
 

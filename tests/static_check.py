@@ -350,6 +350,41 @@ def check_property_traps(path, traps):
     return problems
 
 
+def check_bare_names(path):
+    """Names a module refers to but never binds.
+
+    The attribute check above only validates `name.attribute`; a module-level constant that
+    nothing references is invisible to it. `_EDGE_CACHE` was swallowed by a careless merge,
+    the module still imported fine, and every edge-coordinate read then answered "0 items" —
+    reports caught it, static_check did not.
+    """
+    import builtins
+
+    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+    imports, defined = _module_scope(tree)
+    allow = set(dir(builtins)) | {"__name__", "__file__", "__doc__", "__class__",
+                                  "__all__", "__package__", "__loader__", "__spec__"}
+    module_names = imports | defined | allow
+    problems = []
+    for func in tree.body:
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        available = module_names | _params(func) | _locals(func)
+        # Nested functions and lambdas bring their own parameters; walking the outer body
+        # without them produced 99 false positives on the first run.
+        for sub in ast.walk(func):
+            if isinstance(sub, ast.arg):
+                available.add(sub.arg)
+            elif isinstance(sub, ast.Global):
+                available.update(sub.names)
+        for node in ast.walk(func):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in available:
+                    problems.append("%s:%d: %r is never defined in this module"
+                                    % (os.path.basename(path), node.lineno, node.id))
+    return problems
+
+
 def main():
     if not os.path.exists(SERVER):
         print("server.py not found at %s" % SERVER)
@@ -361,8 +396,10 @@ def main():
             problems.extend(check_tools_module(module_path))
             problems.extend(check_property_traps(module_path, PROPERTY_TRAPS))
             problems.extend(check_duplicate_defs(module_path))
+            problems.extend(check_bare_names(module_path))
     problems.extend(check_property_traps(SERVER, PROPERTY_TRAPS))
     problems.extend(check_duplicate_defs(SERVER))
+    problems.extend(check_bare_names(SERVER))
     problems.extend(check_readme([t.name for t in tools]))
     problems.extend(check_stale_roadmap(README, PYPROJECT))
     problems.extend(check_wrapper_signatures(SERVER))
