@@ -4095,8 +4095,12 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
         blockers, pending, passed, checks = [], [], [], {}
         ledger_missing = []
 
-        def record(name, ok, detail=None, blocking=True):
-            checks[name] = {"ok": bool(ok), "detail": detail}
+        def record(name, ok, detail=None, blocking=True, **extra):
+            # `extra` carries the numbers behind the verdict (attached vs excused); without
+            # them a reader cannot tell "8 attached" from "23 attached".
+            entry = {"ok": bool(ok), "detail": detail}
+            entry.update(extra)
+            checks[name] = entry
             if ok:
                 passed.append(name)
             elif blocking:
@@ -4191,19 +4195,22 @@ def delivery_check(model_path, drawing_path, ai_supplied=None, require_gdt=False
         att = verify_dimension_attachments(drawing_path)
         if att.get("ok"):
             all_orphans = att.get("orphans") or []
-            # Only count the ones with no nearby leader as blocking. The rest were moved by
-            # layout/set_dimension_position and still lead to geometry — pruning them would
-            # lose real dimensions (prune_orphan_dimensions warns exactly about that).
-            live = [o for o in all_orphans if not o.get("orphan_with_leader")]
-            moved_ok = len(all_orphans) - len(live)
-            orphan = len(live)
+            # Every orphan counts. An earlier version excused the ones sitting near the view
+            # outline; since dimensions are parked outside the outline by design, that
+            # excused all of them (15/15 in a report) and turned a real failure into ok.
+            # Proximity is reported, never used to clear a blocker.
+            orphan = len(all_orphans)
+            near_view = sum(1 for o in all_orphans if o.get("orphan_near_view"))
             dim_count = int(att.get("dimension_count") or 0)
-            suffix = ("（另有 %d 条移动过的尺寸仍有引线，不计入）" % moved_ok
-                      if moved_ok else "")
+            attached = max(dim_count - orphan, 0)
+            suffix = ("（其中 %d 条位置在视图附近，但引线未验证）" % near_view
+                      if near_view else "")
             record("dimension_attachments", orphan == 0,
                    (("%d/%d 个尺寸无关联实体%s" % (orphan, dim_count, suffix))
                     if orphan
-                    else ("%d 个尺寸均已关联" % dim_count) + suffix),
+                    else ("%d 个尺寸均已关联" % dim_count)),
+                   excused_count=0,
+                   attached_count=attached,
                    blocking=bool(strict_attachments) and orphan > 0)
         else:
             record("dimension_attachments", False,
@@ -4414,11 +4421,9 @@ def verify_dimension_attachments(drawing_path, view_name=None):
                 primary = row["attached_kinds"][0] if row["attached_kinds"] else "none"
                 by_primary[primary] = by_primary.get(primary, 0) + 1
                 if not types:
-                    # A dimension moved with SetPosition reads as orphan even though its
-                    # leader still points at real geometry — reported three times, and
-                    # prune_orphan_dimensions' own caveat already says so. Geometry breaks
-                    # the tie: a live dimension sits near the view it annotates (layout
-                    # parks them just outside the outline), a dead one drifts away.
+                    # `GetAttachedEntities2` is empty; whether that means "loose" or just
+                    # "moved with SetPosition" cannot be decided from the position alone.
+                    # Record the proximity observation, do not treat it as a clearance.
                     position = row.get("position_m")
                     near_leader = False
                     if position:
@@ -4433,11 +4438,17 @@ def verify_dimension_attachments(drawing_path, view_name=None):
                                                <= 0.05)
                         except Exception:
                             near_leader = False
-                    row["orphan_with_leader"] = near_leader
+                    # Proximity is NOT evidence of a leader. Since v0.8.27 dimensions are
+                    # parked just outside the view outline by default, so *every* dimension
+                    # in a tidy sheet sits within 50 mm — and a report showed this "fix"
+                    # excusing 15 genuine orphans (23 = 8 attached + 15 excused) while the
+                    # same receipt still said "23 个尺寸均已关联". Report the observation for
+                    # what it is and leave the verdict alone.
+                    row["orphan_near_view"] = near_leader
                     orphans.append({"view": view.Name, "name": row["name"],
                                     "value_mm": row.get("value_mm"),
                                     "position_m": position,
-                                    "orphan_with_leader": near_leader})
+                                    "orphan_near_view": near_leader})
                 rows.append(row)
 
         total = len(rows)
