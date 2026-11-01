@@ -233,7 +233,7 @@ pending:   27/53 尺寸读不到关联
 开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)——核心一条：**改完必须跑一次真实调用**。
 
 ```bash
-python tests/check_all.py     # 秒级：语法 + 结构 + 71 条历史回归
+python tests/check_all.py     # 秒级：语法 + 结构 + 72 条历史回归
 python tests/smoke.py         # 需 SolidWorks：行为层
 ```
 

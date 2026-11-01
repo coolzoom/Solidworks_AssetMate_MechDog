@@ -1483,6 +1483,99 @@ def add_center_marks(drawing_path, include_slots=True, extended_lines=True):
         return error("center_marks_failed", str(exc))
 
 
+def _nearest_circle_edge(drawing_path, view_name, x, y, tolerance_m=0.005):
+    """Circular edge of `view` nearest to sheet point (x, y), with its sheet centre.
+
+    `doc.Extension.SelectByID2("", "EDGE", x, y)` cannot hit drawing edges by point (a
+    v0.8.23 finding), so every single-point call on a perfectly valid hole returned
+    `edge_not_found` — the report's 3/3 failures — while the batch tool succeeded on the
+    same sheet, because that one ENUMERATES edges. Do the same: enumerate the view's
+    circles, project each centre onto the sheet, take the nearest. x/y then only chooses
+    WHICH hole instead of having to land exactly on the curve.
+
+    Returns (match, None) or (None, reason).
+    """
+    import win32com.client as win
+
+    doc = _open_drawing(drawing_path)
+    view = None
+    for candidate in _iter_views(doc):
+        if getattr(candidate, "Type", None) == 1:
+            continue
+        if view_name and candidate.Name != view_name:
+            continue
+        view = candidate
+        break
+    if view is None:
+        return None, "view_not_found"
+    axis_map, reason = _view_axis_map(view)
+    # `_view_axis_map` reads the part box through open_document(model_path), which switches
+    # the ACTIVE document to the model — the view object and every edge taken from it are
+    # stale afterwards, and `edge.Select2` on a stale handle silently returns False (that is
+    # why the first attempt at this fix still ended in callout_failed). Come back to the
+    # drawing and re-acquire both the view and its edges.
+    doc = _open_drawing(drawing_path)
+    view = None
+    for candidate in _iter_views(doc):
+        if getattr(candidate, "Type", None) == 1:
+            continue
+        if view_name and candidate.Name != view_name:
+            continue
+        view = candidate
+        break
+    if view is None:
+        return None, "view went away after re-opening the drawing"
+    try:
+        doc.ActivateView(view.Name)
+    except Exception:
+        pass
+    doc.ClearSelection2(True)
+    try:
+        position = list(view.Position)
+        scale = float(view.ScaleDecimal)
+    except Exception:
+        return None, "view position unreadable"
+    try:
+        edges = [win.Dispatch(e) for e in (view.GetVisibleEntities2(view, 1) or ())]
+    except Exception:
+        return None, "view has no visible entities"
+
+    best = None
+    for edge in edges:
+        try:
+            curve = win.Dispatch(edge.GetCurve)
+            if curve is None or not curve.IsCircle:
+                continue
+            params = list(curve.CircleParams)
+            centre_model = (float(params[0]), float(params[1]), float(params[2]))
+            radius_m = float(params[6])
+        except Exception:
+            continue
+        if not axis_map:
+            continue
+        axes = axis_map["axes"]
+        centre_m = axis_map["centre_m"]
+        cx = position[0] + (centre_model[axes[0]] - centre_m[axes[0]]) * scale
+        cy = position[1] + (centre_model[axes[1]] - centre_m[axes[1]]) * scale
+        distance = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5
+        if best is None or distance < best[0]:
+            best = (distance, edge, [round(cx, 5), round(cy, 5)],
+                    round(radius_m * 2000, 2))
+    if best is None:
+        if not axis_map:
+            return None, "axes_mismatch: %s" % (reason or "no model->sheet mapping")
+        return None, "no circular edge in this view"
+    if best[0] > tolerance_m:
+        return None, ("nearest circular edge is %.1f mm away (allowed %.0f mm)"
+                      % (best[0] * 1000, tolerance_m * 1000))
+    # Deliberately returns NO edge: reading the part box switched the active document, so
+    # every COM handle taken here belongs to a dead one. `Select2` on such a handle reports
+    # success while `AddHoleCallout2` then returns None — the symptom that made this tool
+    # look impossible to fix. The caller re-finds the circle by diameter on its own handle.
+    return {"centre": best[2], "diameter_mm": best[3],
+            "distance_m": round(best[0], 5)}, None
+
+
 def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
                      save=True):
     """Insert a NATIVE hole callout at a sheet point (meters) on a hole edge, then read
@@ -1519,28 +1612,114 @@ def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
         # SolidWorks returns null even at a correct point.
         from ..sw_session import byref_dispatch_null
 
-        selected = False
-        for sel_type in ("EDGE", "SILHOUETTE"):
-            try:
-                if doc.Extension.SelectByID2("", sel_type, float(x), float(y), 0,
-                                             False, 0, byref_dispatch_null(), 0):
-                    selected = True
-                    break
-            except Exception:
+        # Match by ENUMERATING circles first (see _nearest_circle_edge); coordinate
+        # hit-testing stays only as a fallback for views whose axis mapping is unavailable.
+        circle_match, why = _nearest_circle_edge(
+            drawing_path, view_name or (str(target.Name) if target is not None else None),
+            float(x), float(y))
+        # The helper re-opens the drawing internally, so `doc` and `target` here are stale.
+        doc = _open_drawing(drawing_path)
+        target = None
+        for _view in _iter_views(doc):
+            if getattr(_view, "Type", None) == 1:
                 continue
-        if not selected:
-            return error("edge_not_found",
-                         "No hole edge at or near (%.3f, %.3f)" % (x, y),
-                         "Point at a projected circular edge; use list_circular_edges "
-                         "to get exact positions.")
-        callout = doc.AddHoleCallout2(float(x), float(y), 0.0)
+            if view_name and _view.Name != view_name:
+                continue
+            target = _view
+            break
+        if target is not None:
+            try:
+                doc.ActivateView(target.Name)
+            except Exception:
+                pass
+        # x/y chooses WHICH hole (via the nearest circle); the leader anchor is placed just
+        # outside the view, exactly like the batch tool. Passing the circle centre here made
+        # AddHoleCallout2 return None even with the edge correctly selected — the text
+        # anchor and the edge selection compete for the same point.
+        callout_point = [float(x), float(y)]
+        try:
+            outline = list(target.GetOutline or ())
+            if len(outline) >= 4:
+                callout_point = [outline[2] + 0.015, (outline[1] + outline[3]) / 2.0]
+        except Exception:
+            pass
+        circle_matched = None
+        if circle_match is not None:
+            circle_matched = {"diameter_mm": circle_match["diameter_mm"],
+                              "distance_m": circle_match["distance_m"],
+                              "centre_m": list(circle_match["centre"])}
+            callout_point = list(circle_match["centre"])
+            # Re-find and select the same circle on THIS handle. Matching by diameter keeps
+            # it independent of the projection that the helper already did.
+            import win32com.client as _win_pick
+
+            picked = False
+            _cands = []
+            try:
+                for _edge in [_win_pick.Dispatch(e)
+                              for e in (target.GetVisibleEntities2(target, 1) or ())]:
+                    try:
+                        _curve = _win_pick.Dispatch(_edge.GetCurve)
+                        if _curve is None or not _curve.IsCircle:
+                            continue
+                        _params = list(_curve.CircleParams)
+                        if abs(float(_params[6]) * 2000
+                               - float(circle_match["diameter_mm"])) > 0.2:
+                            continue
+                        _cands.append((float(_params[2]), _edge))
+                    except Exception:
+                        continue
+            except Exception:
+                _cands = []
+            # A hole has two concentric circles (near face and far face) and only the near
+            # one is annotatable. Same rule as the batch tool: take the smallest z.
+            for _z, _edge in sorted(_cands, key=lambda entry: entry[0]):
+                try:
+                    if _edge.Select2(False, 0):
+                        picked = True
+                        break
+                except Exception:
+                    continue
+            if not picked:
+                return error("select_failed",
+                             "Found the Ø%g circle but could not select it on this document"
+                             % circle_match["diameter_mm"],
+                             "Use add_hole_callouts (batch) for this view instead.")
+        else:
+            selected = False
+            for sel_type in ("EDGE", "SILHOUETTE"):
+                try:
+                    if doc.Extension.SelectByID2("", sel_type, float(x), float(y), 0,
+                                                 False, 0, byref_dispatch_null(), 0):
+                        selected = True
+                        break
+                except Exception:
+                    continue
+            if not selected:
+                return error("edge_not_found",
+                             "No hole edge near (%.4f, %.4f)" % (x, y),
+                             "Pass the hole CENTRE from list_circular_edges.",
+                             nearest=why)
+        callout = doc.AddHoleCallout2(callout_point[0], callout_point[1], 0.0)
         if callout is None:
+            # Keep the evidence: with the circle matched and its edge selected, a null here
+            # means AddHoleCallout2 itself refused — not that the point was wrong. Reporting
+            # the match lets the next round tell those apart without re-running blind.
+            _sel_count = None
+            try:
+                _sel_count = int(doc.SelectionManager.GetSelectedObjectCount2(-1))
+            except Exception:
+                pass
             return error(
                 "callout_failed",
-                "No hole edge found at (%.3f, %.3f) on the sheet" % (x, y),
-                "Point at a hole's projected circle in a model view; use drawing_audit "
-                "view outlines to locate one, or pass view_name.",
-            )
+                "AddHoleCallout2 returned None at (%.4f, %.4f)" % tuple(callout_point),
+                "Circle {dia} matched at distance {dist} m; selection before the call: "
+                "{sel}. If that is >=1, the edge was selected and SolidWorks still refused "
+                "— use add_hole_callouts (batch) for this view.".format(
+                    dia=(circle_matched or {}).get("diameter_mm"),
+                    dist=(circle_matched or {}).get("distance_m"),
+                    sel=_sel_count),
+                matched_circle=circle_matched, selected_before_call=_sel_count)
 
         readback = {}
         # GetText is a method on some builds and a property on others: call it, and only
@@ -1607,6 +1786,9 @@ def add_hole_callout(drawing_path, x, y, view_name=None, model_path=None,
             annotations_after=after,
             readback=readback,
             model_match=match,
+            # Which circle the point resolved to. Without it a caller cannot tell "the hole
+            # I meant" from "the nearest hole", and this tool used to fail outright instead.
+            matched_circle=circle_matched,
             saved=bool(save),
             note="比对 model_match.ok；false 表示标注落在别处或模型无对应孔径。",
         )
@@ -2728,6 +2910,17 @@ def _view_axis_map(view):
         return None, "outline_too_small"
     width = box[2] - box[0]
     height = box[3] - box[1]
+    # The outline is in SHEET metres and the part box is in MODEL metres, so the extents
+    # have to be scaled before they can be compared. Without this factor every view that
+    # is not 1:1 failed to match and the tool answered `axes_mismatch` — which is exactly
+    # what a report saw on 30 of 30 circles, and what made single-point hole callouts
+    # impossible (they need a circle centre in sheet coordinates).
+    try:
+        view_scale = float(view.ScaleDecimal)
+    except Exception:
+        view_scale = 1.0
+    if view_scale <= 1e-9:
+        view_scale = 1.0
 
     try:
         model = open_document(model_path)
@@ -2748,7 +2941,8 @@ def _view_axis_map(view):
     for a, b in pairs:
         if extent[a] <= 1e-6 or extent[b] <= 1e-6:
             continue
-        scored.append((abs(extent[a] - width) + abs(extent[b] - height), (a, b)))
+        scored.append((abs(extent[a] * view_scale - width)
+                       + abs(extent[b] * view_scale - height), (a, b)))
     if not scored:
         return None, "axes_not_found"
     scored.sort(key=lambda item: item[0])

@@ -1698,6 +1698,22 @@ def assert_mojibake_is_repaired():
     return "lossless repair with a safe pass-through"
 
 
+def assert_axis_map_scales_to_sheet():
+    """0.8.34 — model extents were compared with sheet extents without the view scale.
+
+    Consequence: any view that is not 1:1 answered `axes_mismatch`, so list_circular_edges
+    returned no coordinates at all (a report saw 30/30), cut_plane_origin could not map, and
+    single-point hole callouts had nothing to match against.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "_view_axis_map")) or ""
+    assert "view_scale" in body, "the axis map does not read ScaleDecimal"
+    assert "extent[a] * view_scale" in body and "extent[b] * view_scale" in body, (
+        "model extents are compared with sheet metres unscaled — every non-1:1 view fails")
+    return "model extents scaled before comparison"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1770,6 +1786,7 @@ STATIC_REGRESSIONS = [
     ("0.8.33 dedupe full name", assert_dedupe_uses_full_name),
     ("0.8.33 callout text value", assert_callout_text_carries_value),
     ("0.8.33 mojibake repaired", assert_mojibake_is_repaired),
+    ("0.8.34 axis map scaled", assert_axis_map_scales_to_sheet),
 ]
 
 

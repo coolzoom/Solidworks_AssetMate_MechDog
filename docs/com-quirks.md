@@ -1365,3 +1365,34 @@ if not has_diameter and not text_unreadable:     # 有文本但没 Ø 才拒
 同一次调用里，印着 `Ø8` 的 callout `SystemValue` 是 **4.0（半径）**，
 印着 `Ø15` 的却是 **15.0（已经是直径）**。所以 `list_drawing_annotations` 现在
 **以文本里的数字为准**，取不到才回退 `SystemValue` 并标 `diameter_source`。
+
+## 二十九、`_view_axis_map` 漏乘比例：一条 bug 卡住三个工具（0.8.34）
+
+```python
+scored.append((abs(extent[a] - width) + abs(extent[b] - height), (a, b)))
+```
+
+`extent` 来自 `GetPartBox`，是**模型米**；`width/height` 来自 `precise_outline`，是**图纸米**。
+没乘视图比例，所以只要视图不是 1:1 就匹配不上，直接返回 `axes_mismatch`。
+
+连锁后果：
+
+| 工具 | 症状 |
+|---|---|
+| `list_circular_edges` | 全长返回 `x: null / position_unavailable`（实测门板 0/9，修复后 9/9） |
+| `add_section_view(cut_plane_origin=…)` | 无法把模型坐标映射进视图，返回 `cut_plane_unmapped` |
+| `add_hole_callout`（单点） | 没有可匹配的圆，一切坐标都 `edge_not_found` |
+
+一行 `extent * view_scale` 三个都通。**教训**：跨坐标系的比较，先问一句"这两边单位一样吗"。
+
+### 单点孔标注：匹配修好了，调用还没通
+
+改用「枚举圆 + 投影取最近」后：匹配距离 **0.0 m**、`Select2` 后选择计数 **1**，
+但 `AddHoleCallout2` 仍返回 `None`。批量版在同一个视图能成功，差异未定位。
+
+已把证据写进错误体（`matched_circle` + `selected_before_call`），下轮不必重跑盲猜。
+
+另外两个已经踩过的坑，记在这里省得再踩：
+- `_view_axis_map` 读零件包围盒会 `open_document(model)`，**把活动文档切成模型**，
+  之前取的 `view` / `edge` 全部失效——`Select2` 在死句柄上会"成功"，`AddHoleCallout2` 随即返回 None；
+- 孔有**两面同心圆**，只有近面可标，批量版按 `z` 最小取，单点版也照此。
