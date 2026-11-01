@@ -66,30 +66,6 @@ def _function_node(tree, name):
     return None
 
 
-def _locate(name):
-    """Parse whichever tools module defines `name`; returns (tree, source, node).
-
-    tools/drawing.py split into the tools/drawing/ package, so "which file holds
-    the function" is a lookup, not a constant. Returns the matching file's tree
-    and source so ast.get_source_segment keeps working on the right text.
-    """
-    candidates = []
-    pkg = os.path.join(TOOLS, "drawing")
-    if os.path.isdir(pkg):
-        candidates.extend(os.path.join(pkg, f) for f in sorted(os.listdir(pkg))
-                          if f.endswith(".py"))
-    if os.path.isdir(TOOLS):
-        candidates.extend(os.path.join(TOOLS, f) for f in sorted(os.listdir(TOOLS))
-                          if f.endswith(".py"))
-    for path in candidates:
-        with open(path, encoding="utf-8") as f:
-            src = f.read()
-        tree = ast.parse(src, filename=path)
-        node = _function_node(tree, name)
-        if node is not None:
-            return tree, src, node
-    return None, "", None
-
 
 # ---------------------------------------------------------------- static assertions
 
