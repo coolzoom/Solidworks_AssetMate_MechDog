@@ -1880,6 +1880,29 @@ def assert_static_check_covers_bare_names():
     return "static_check fails on undefined bare names"
 
 
+def assert_circular_edges_predict_annotatability():
+    """0.8.39 — the circle list never said which circles can take a callout.
+
+    A report burned 13 guaranteed-failing calls on an outline view. The rule is geometric: a
+    circle is a hole MOUTH only when its normal runs along the view direction. Measured on
+    door.SLDPRT after the fix — Ø6 ×4 -> facing=side / hint=False (the batch tool cannot
+    annotate them either), Ø8 ×2 + Ø15 ×3 -> facing=front / hint=True (5/5 succeed).
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "list_circular_edges")) or ""
+    for key in ("annotatable_hint", "facing", "view_kind"):
+        assert key in body, "the circle list does not report %s" % key
+    assert "depth_axis = 3 - axes[0] - axes[1]" in body, (
+        "the view direction is not derived from the two displayed axes")
+    assert '"axis"' in body, "the circle normal is not read from CircleParams"
+    kind_body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                          "_view_kind")) or ""
+    assert '7: "model"' in kind_body, (
+        "IView.Type 7 is a standard model view; without it every view reports type_7")
+    return "annotatability predicted from the circle normal"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1962,6 +1985,7 @@ STATIC_REGRESSIONS = [
     ("0.8.38 call_method once", assert_call_method_defined_once),
     ("0.8.38 health provenance", assert_health_reports_provenance),
     ("0.8.38 static check bare names", assert_static_check_covers_bare_names),
+    ("0.8.39 circle annotatability", assert_circular_edges_predict_annotatability),
 ]
 
 

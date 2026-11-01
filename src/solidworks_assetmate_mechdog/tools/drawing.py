@@ -4528,6 +4528,22 @@ def prune_orphan_dimensions(drawing_path, view_name=None, dry_run=True, save=Tru
         return error("prune_failed", str(exc))
 
 
+def _view_kind(view):
+    """What sort of view this is (IView.Type: 1=sheet, 2=section, 3=detail, 4=projected).
+
+    Only used to label a circle's annotatability: report a view kind rather than making the
+    caller infer it from the view name, which is a localised string.
+    """
+    try:
+        view_type = int(view.Type)
+    except Exception:
+        return "unknown"
+    # Measured on SW2024: a drawing SHEET is 1, a standard model view is 7, a section 2 and
+    # a detail 3. (The first version of this map guessed and printed "type_7" for every view.)
+    return {1: "sheet", 2: "section", 3: "detail", 4: "projected", 7: "model"}.get(
+        view_type, "type_%d" % view_type)
+
+
 def list_circular_edges(drawing_path, view_name=None, min_diameter_mm=0.0):
     """Circular edges of a view, with sheet position and diameter.
 
@@ -4573,6 +4589,10 @@ def list_circular_edges(drawing_path, view_name=None, min_diameter_mm=0.0):
                         "diameter_mm": diameter,
                         "centre_model": [float(params[0]), float(params[1]),
                                          float(params[2])],
+                        # Circle normal. A circle is a hole MOUTH only when its normal is
+                        # (anti)parallel to the direction the view looks along; otherwise
+                        # you are seeing the cylinder wall, and AddHoleCallout2 refuses.
+                        "axis": [float(params[3]), float(params[4]), float(params[5])],
                     })
                 except Exception:
                     continue
@@ -4592,6 +4612,7 @@ def list_circular_edges(drawing_path, view_name=None, min_diameter_mm=0.0):
             for item in circles:
                 row = {"view": view.Name, "diameter_mm": item["diameter_mm"],
                        "x": None, "y": None}
+                depth_axis = None
                 if axis_map:
                     axes = axis_map["axes"]
                     centre_m = axis_map["centre_m"]
@@ -4599,8 +4620,26 @@ def list_circular_edges(drawing_path, view_name=None, min_diameter_mm=0.0):
                                                - centre_m[axes[0]]) * scale, 5)
                     row["y"] = round(pos[1] + (item["centre_model"][axes[1]]
                                                - centre_m[axes[1]]) * scale, 5)
+                    # The two axes the view DISPLAYS leave exactly one it looks along.
+                    depth_axis = 3 - axes[0] - axes[1]
                 else:
                     row["position_unavailable"] = reason
+
+                # ---- annotatability, predicted instead of discovered ----------------
+                # A report burned 13 guaranteed-failing calls on an outline view because
+                # nothing in this list said which circles can take a callout. The rule is
+                # geometric: the circle's normal must run along the view direction.
+                row["view_kind"] = _view_kind(view)
+                axis_vec = item.get("axis") or [0.0, 0.0, 0.0]
+                if depth_axis is not None and any(abs(v) > 1e-9 for v in axis_vec):
+                    dominant = max(range(3), key=lambda i: abs(axis_vec[i]))
+                    faces_viewer = (dominant == depth_axis
+                                    and abs(axis_vec[depth_axis]) >= 0.9)
+                    row["facing"] = "front" if faces_viewer else "side"
+                    row["annotatable_hint"] = faces_viewer
+                else:
+                    row["facing"] = "unknown"
+                    row["annotatable_hint"] = "unknown"
                 out.append(row)
         return drawing_ok(drawing=doc.GetTitle, count=len(out), circles=out)
     except (FileNotFoundError, ValueError) as exc:

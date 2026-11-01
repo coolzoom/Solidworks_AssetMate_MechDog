@@ -1499,3 +1499,40 @@ clone 下来跑 `python tests/smoke.py` 得到一行 `missing test model: ...` �
 现在 `check_bare_names()` 遍历每个模块的顶层函数，把 `ast.Name`（Load）逐个对
 `imports ∪ 模块级定义 ∪ 参数 ∪ 局部 ∪ 内建 ∪ dunder` 求解。第一版漏了**嵌套函数的参数**，
 99 个误报；补上 `ast.arg` 与 `global` 后归零。
+
+## 三十三、可标注性可以算出来，不用试出来（0.8.39）
+
+反馈：外形视图 13 条圆边，`add_hole_callout` 3/3 全拒；端视图 2/10、剖视 4/9 可标。
+规律很明显，但**清单里没有任何可标注性信号**，调用方只能逐条试。
+
+### 判据是几何的
+
+一个圆能不能打孔标注，取决于**它的法向是否沿视图的观察方向**：
+
+```python
+axis_vec = CircleParams[3:6]                    # 圆的法向
+depth_axis = 3 - axes[0] - axes[1]              # 视图显示两个轴，剩下那个就是观察方向
+dominant = max(range(3), key=lambda i: abs(axis_vec[i]))
+faces_viewer = dominant == depth_axis and abs(axis_vec[depth_axis]) >= 0.9
+```
+
+`axes` 来自既有的 `_view_axis_map`，所以**零额外 API 成本**，不碰 COM。
+
+### 实测完全对齐
+
+门板 `door.SLDPRT`：
+
+| 圆 | `facing` | `annotatable_hint` | 实际 |
+|---|---|---|---|
+| Ø6 × 4 | `side` | `false` | 单点与批量**都标不出** |
+| Ø8 × 2 | `front` | `true` | 5/5 成功 |
+| Ø15 × 3 | `front` | `true` | 5/5 成功 |
+
+9 条圆边，预判 9 条全对。调用方现在可以在清单阶段直接过滤。
+
+### 顺带：`IView.Type` 的 7 是标准模型视图
+
+初版 `_view_kind` 按文档猜了 `{1: sheet, 2: section, 3: detail, 4: projected}`，
+结果每条都显示 `type_7`——测下来**图纸是 1、标准模型视图是 7**。补上后正常。
+
+猜枚举值之前先打一次日志，比事后看 `type_7` 猜半天快。
