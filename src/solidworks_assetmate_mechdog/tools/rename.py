@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 
 from ..sw_session import (
+    tool_guard,
     SW_DOC_ASSEMBLY,
     SW_DOC_PART,
     error,
@@ -163,6 +164,7 @@ def _auto_rename(assembly_path, part_paths, mapping, prefix, suffix, save):
     return ok(**result)
 
 
+@tool_guard("rename_failed")
 def rename_components(
     part_paths=None,
     mapping=None,
@@ -243,70 +245,67 @@ def rename_components(
     if not mapping and not prefix and not suffix:
         return error("bad_input", "Provide mapping, prefix, or suffix — otherwise nothing changes")
 
-    try:
-        changes, conflicts = [], []
-        for raw in part_paths:
-            path = os.path.abspath(raw)
-            if not os.path.exists(path):
-                conflicts.append({"path": path, "reason": "not_found"})
-                continue
-            if os.path.splitext(path)[1].lower() not in ALLOWED_EXT:
-                conflicts.append({"path": path, "reason": "unsupported_extension"})
-                continue
-            target = _target_name(path, mapping or {}, prefix, suffix)
-            if os.path.normcase(target) == os.path.normcase(path):
-                conflicts.append({"path": path, "reason": "name_unchanged"})
-                continue
-            if any(ch in ILLEGAL for ch in os.path.basename(target)):
-                conflicts.append({"path": path, "reason": "illegal_characters", "target": target})
-                continue
-            if os.path.exists(target):
-                conflicts.append({"path": path, "reason": "target_exists", "target": target})
-                continue
-            changes.append({"old": path, "new": target})
+    changes, conflicts = [], []
+    for raw in part_paths:
+        path = os.path.abspath(raw)
+        if not os.path.exists(path):
+            conflicts.append({"path": path, "reason": "not_found"})
+            continue
+        if os.path.splitext(path)[1].lower() not in ALLOWED_EXT:
+            conflicts.append({"path": path, "reason": "unsupported_extension"})
+            continue
+        target = _target_name(path, mapping or {}, prefix, suffix)
+        if os.path.normcase(target) == os.path.normcase(path):
+            conflicts.append({"path": path, "reason": "name_unchanged"})
+            continue
+        if any(ch in ILLEGAL for ch in os.path.basename(target)):
+            conflicts.append({"path": path, "reason": "illegal_characters", "target": target})
+            continue
+        if os.path.exists(target):
+            conflicts.append({"path": path, "reason": "target_exists", "target": target})
+            continue
+        changes.append({"old": path, "new": target})
 
-        result = {
-            "mode": "file",
-            "planned": changes,
-            "conflicts": conflicts,
-            "applied": False,
-        }
-        if assembly_path and changes:
-            old_names = {os.path.basename(c["old"]).lower() for c in changes}
-            try:
-                result["affected_components"] = _reference_report(assembly_path, old_names)
-            except Exception as exc:
-                result["reference_check_error"] = str(exc)
-
-        if not apply:
-            result["dry_run"] = True
-            result["message"] = "Nothing renamed. apply=true performs the file renames."
-            return ok(**result)
-
-        done = []
+    result = {
+        "mode": "file",
+        "planned": changes,
+        "conflicts": conflicts,
+        "applied": False,
+    }
+    if assembly_path and changes:
+        old_names = {os.path.basename(c["old"]).lower() for c in changes}
         try:
-            for change in changes:
-                os.rename(change["old"], change["new"])
-                done.append(change)
+            result["affected_components"] = _reference_report(assembly_path, old_names)
         except Exception as exc:
-            for change in reversed(done):
-                try:
-                    os.rename(change["new"], change["old"])
-                except Exception:
-                    pass
-            return error(
-                "rename_failed",
-                "%s; rolled back %d completed rename(s)" % (exc, len(done)),
-                "Close the file in SolidWorks first — an open document cannot be renamed.",
-            )
+            result["reference_check_error"] = str(exc)
 
-        result.update(applied=True, renamed=done)
-        if result.get("affected_components"):
-            result["warning"] = (
-                "Renamed files are referenced by %d component(s); reopen the assembly or "
-                "re-point the references, otherwise it will show missing components."
-                % len(result["affected_components"])
-            )
+    if not apply:
+        result["dry_run"] = True
+        result["message"] = "Nothing renamed. apply=true performs the file renames."
         return ok(**result)
+
+    done = []
+    try:
+        for change in changes:
+            os.rename(change["old"], change["new"])
+            done.append(change)
     except Exception as exc:
-        return error("rename_failed", str(exc))
+        for change in reversed(done):
+            try:
+                os.rename(change["new"], change["old"])
+            except Exception:
+                pass
+        return error(
+            "rename_failed",
+            "%s; rolled back %d completed rename(s)" % (exc, len(done)),
+            "Close the file in SolidWorks first — an open document cannot be renamed.",
+        )
+
+    result.update(applied=True, renamed=done)
+    if result.get("affected_components"):
+        result["warning"] = (
+            "Renamed files are referenced by %d component(s); reopen the assembly or "
+            "re-point the references, otherwise it will show missing components."
+            % len(result["affected_components"])
+        )
+    return ok(**result)

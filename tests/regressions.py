@@ -34,6 +34,23 @@ if os.path.join(ROOT, "src") not in sys.path:
 
 
 def _read(relpath):
+    if relpath == "tools/drawing.py":
+        # drawing.py split into the tools/drawing/ package; hand callers a single
+        # virtual source so "find function X" stays one lookup. `from __future__`
+        # would be illegal mid-file, so it is dropped; every other statement —
+        # defs, constants, relative imports — parses verbatim. Nodes located in
+        # this concat parse back to their own source segments correctly.
+        pkg = os.path.join(TOOLS, "drawing")
+        if os.path.isdir(pkg):
+            parts = []
+            for name in sorted(os.listdir(pkg)):
+                if not name.endswith(".py") or name == "__init__.py":
+                    continue
+                with open(os.path.join(pkg, name), encoding="utf-8") as f:
+                    parts.append("\n".join(
+                        line for line in f.read().splitlines()
+                        if not line.startswith("from __future__")))
+            return "\n\n".join(parts)
     with open(os.path.join(SRC, relpath), encoding="utf-8") as f:
         return f.read()
 
@@ -47,6 +64,31 @@ def _function_node(tree, name):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     return None
+
+
+def _locate(name):
+    """Parse whichever tools module defines `name`; returns (tree, source, node).
+
+    tools/drawing.py split into the tools/drawing/ package, so "which file holds
+    the function" is a lookup, not a constant. Returns the matching file's tree
+    and source so ast.get_source_segment keeps working on the right text.
+    """
+    candidates = []
+    pkg = os.path.join(TOOLS, "drawing")
+    if os.path.isdir(pkg):
+        candidates.extend(os.path.join(pkg, f) for f in sorted(os.listdir(pkg))
+                          if f.endswith(".py"))
+    if os.path.isdir(TOOLS):
+        candidates.extend(os.path.join(TOOLS, f) for f in sorted(os.listdir(TOOLS))
+                          if f.endswith(".py"))
+    for path in candidates:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        tree = ast.parse(src, filename=path)
+        node = _function_node(tree, name)
+        if node is not None:
+            return tree, src, node
+    return None, "", None
 
 
 # ---------------------------------------------------------------- static assertions
@@ -1221,6 +1263,30 @@ def assert_no_undefined_bare_calls():
                     defined.add(node.name)
                 elif isinstance(node, ast.Global):
                     defined.update(node.names)
+            # `from ._core import *` — the drawing/ package's feature modules pull
+            # shared helpers via star; expand the sibling module's names or every
+            # one of them reports as undefined.
+            for node in tree.body:
+                if not (isinstance(node, ast.ImportFrom) and node.level
+                        and node.module
+                        and any(a.name == "*" for a in node.names)):
+                    continue
+                base = os.path.dirname(path)
+                for _ in range(node.level - 1):
+                    base = os.path.dirname(base)
+                target = os.path.join(base, node.module.replace(".", os.sep) + ".py")
+                if not os.path.exists(target):
+                    continue
+                sub_tree = ast.parse(open(target, encoding="utf-8").read())
+                for s in ast.walk(sub_tree):
+                    if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.ClassDef)):
+                        defined.add(s.name)
+                    elif isinstance(s, (ast.Import, ast.ImportFrom)):
+                        for a in s.names:
+                            defined.add(a.asname or a.name.split(".")[0])
+                    elif isinstance(s, ast.Name) and isinstance(s.ctx, ast.Store):
+                        defined.add(s.id)
             # Check every bare NAME, not just call targets: a definition can be deleted by
             # a careless edit (the v0.8.24 bundle swallowed `_EDGE_CACHE = {}` that way),
             # and `_EDGE_CACHE[stamp]` is a Name(Load), not a Call.

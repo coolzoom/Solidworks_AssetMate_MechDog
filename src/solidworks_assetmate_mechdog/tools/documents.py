@@ -60,25 +60,24 @@ def _doc_row(doc):
     return row
 
 
+@tool_guard("list_failed")
 def list_documents():
     """Every document currently loaded in the SolidWorks session."""
+    sw = get_sw()
+    docs = sw.GetDocuments
+    rows = []
+    for doc in (docs or []):
+        rows.append(_doc_row(doc))
+    active = None
     try:
-        sw = get_sw()
-        docs = sw.GetDocuments
-        rows = []
-        for doc in (docs or []):
-            rows.append(_doc_row(doc))
-        active = None
-        try:
-            active_doc = sw.ActiveDoc
-            active = str(active_doc.GetTitle) if active_doc is not None else None
-        except Exception:
-            pass
-        return ok(count=len(rows), active=active, documents=rows)
-    except Exception as exc:
-        return error("list_failed", str(exc))
+        active_doc = sw.ActiveDoc
+        active = str(active_doc.GetTitle) if active_doc is not None else None
+    except Exception:
+        pass
+    return ok(count=len(rows), active=active, documents=rows)
 
 
+@tool_guard("open_failed")
 def open_file(path, activate=True):
     """Open a native SolidWorks document and report what was loaded.
 
@@ -86,28 +85,21 @@ def open_file(path, activate=True):
     error/warning VARIANTs and the component-cache invalidation all apply.
     Neutral formats (STEP/IGES/...) are rejected with a pointer to import_file.
     """
-    try:
-        path = check_path_allowed(path)
-        ext = os.path.splitext(path)[1].lower()
-        if ext in _NEUTRAL_EXTENSIONS:
-            return error(
-                "neutral_format",
-                "%s is a neutral CAD file — import_file converts it to a part."
-                % os.path.basename(path),
-            )
-        doc = open_document(path)
-        if activate:
-            try:
-                _activate(doc)
-            except Exception:
-                pass
-        return ok(action="opened", **_doc_row(doc))
-    except PermissionError as exc:
-        return error("path_not_allowed", str(exc))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("open_failed", str(exc))
+    path = check_path_allowed(path)
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _NEUTRAL_EXTENSIONS:
+        return error(
+            "neutral_format",
+            "%s is a neutral CAD file — import_file converts it to a part."
+            % os.path.basename(path),
+        )
+    doc = open_document(path)
+    if activate:
+        try:
+            _activate(doc)
+        except Exception:
+            pass
+    return ok(action="opened", **_doc_row(doc))
 
 
 def _activate(doc):
@@ -147,33 +139,32 @@ def _find_open_doc(ref):
     return None, docs
 
 
+@tool_guard("activate_failed")
 def activate_document(ref):
     """Bring an already-open document to the front (ActiveDoc).
 
     ref accepts a title ("Part1"), a full path, or a basename. Refuses when the
     name is ambiguous instead of activating an arbitrary match.
     """
-    try:
-        doc, docs = _find_open_doc(ref)
-        if doc is None:
-            titles = []
-            for d in docs:
-                try:
-                    titles.append(str(d.GetTitle))
-                except Exception:
-                    pass
-            return error(
-                "doc_not_open",
-                "No unique open document matches %r" % ref,
-                "Open it first with open_document. Open documents: %s" % titles,
-            )
-        activated = _activate(doc)
-        result = activated if activated is not None else doc
-        return ok(action="activated", **_doc_row(result))
-    except Exception as exc:
-        return error("activate_failed", str(exc))
+    doc, docs = _find_open_doc(ref)
+    if doc is None:
+        titles = []
+        for d in docs:
+            try:
+                titles.append(str(d.GetTitle))
+            except Exception:
+                pass
+        return error(
+            "doc_not_open",
+            "No unique open document matches %r" % ref,
+            "Open it first with open_document. Open documents: %s" % titles,
+        )
+    activated = _activate(doc)
+    result = activated if activated is not None else doc
+    return ok(action="activated", **_doc_row(result))
 
 
+@tool_guard("close_failed")
 def close_document(ref=None, save=False, all_docs=False):
     """Close a document by title/path/basename — or everything with all_docs=True.
 
@@ -182,40 +173,38 @@ def close_document(ref=None, save=False, all_docs=False):
     to discard; a document with unsaved changes is reported so the discard is
     never silent).
     """
+    sw = get_sw()
+    if all_docs:
+        docs = list(sw.GetDocuments or [])
+        titles = []
+        for d in docs:
+            try:
+                titles.append(str(d.GetTitle))
+            except Exception:
+                pass
+        sw.CloseAllDocuments(save)
+        return ok(action="closed_all", count=len(titles), saved=save,
+                  closed=titles)
+    if not ref:
+        return error("bad_input", "ref (title/path/basename) or all_docs=True required")
+    doc, _ = _find_open_doc(ref)
+    if doc is None:
+        return error("doc_not_open", "No unique open document matches %r" % ref)
+    row = _doc_row(doc)
+    if row.get("unsaved_changes") and not save:
+        row["discarded_unsaved_changes"] = True
+    title = str(doc.GetTitle)
     try:
-        sw = get_sw()
-        if all_docs:
-            docs = list(sw.GetDocuments or [])
-            titles = []
-            for d in docs:
-                try:
-                    titles.append(str(d.GetTitle))
-                except Exception:
-                    pass
-            sw.CloseAllDocuments(save)
-            return ok(action="closed_all", count=len(titles), saved=save,
-                      closed=titles)
-        if not ref:
-            return error("bad_input", "ref (title/path/basename) or all_docs=True required")
-        doc, _ = _find_open_doc(ref)
-        if doc is None:
-            return error("doc_not_open", "No unique open document matches %r" % ref)
-        row = _doc_row(doc)
-        if row.get("unsaved_changes") and not save:
-            row["discarded_unsaved_changes"] = True
-        title = str(doc.GetTitle)
-        try:
-            path = str(doc.GetPathName or "")
-            if path:
-                invalidate_components(path)
-        except Exception:
-            pass
-        sw.CloseDoc(title)
-        return ok(action="closed", saved=save, **row)
-    except Exception as exc:
-        return error("close_failed", str(exc))
+        path = str(doc.GetPathName or "")
+        if path:
+            invalidate_components(path)
+    except Exception:
+        pass
+    sw.CloseDoc(title)
+    return ok(action="closed", saved=save, **row)
 
 
+@tool_guard("save_failed")
 def save_document(path=None, new_path=None, overwrite=False):
     """Save a document in place, or save-as to a new path.
 
@@ -224,39 +213,32 @@ def save_document(path=None, new_path=None, overwrite=False):
     unchanged (same quirk batch_export relies on). Native extensions do a real
     save-as; overwrite=False refuses an existing target instead of clobbering it.
     """
-    try:
-        if path:
-            doc = open_document(path)
-        else:
-            doc = get_sw().ActiveDoc
-            if doc is None:
-                return error("no_active_doc", "No active document and no path given")
-        row = _doc_row(doc)
-        if not new_path:
-            doc.SaveSilent
-            return ok(action="saved", **row)
-        target = check_path_allowed(new_path)
-        ext = os.path.splitext(target)[1].lower()
-        if os.path.exists(target) and not overwrite:
-            return error("target_exists",
-                         "%s already exists — pass overwrite=True" % target)
-        if ext in _NEUTRAL_EXTENSIONS:
-            doc.SaveAsSilent(target, False)
-            if not os.path.exists(target):
-                return error("export_failed",
-                             "SolidWorks reported success but wrote no file",
-                             target=target)
-            return ok(action="exported", target=target,
-                      bytes=os.path.getsize(target),
-                      note="neutral export — document path unchanged", **row)
+    if path:
+        doc = open_document(path)
+    else:
+        doc = get_sw().ActiveDoc
+        if doc is None:
+            return error("no_active_doc", "No active document and no path given")
+    row = _doc_row(doc)
+    if not new_path:
+        doc.SaveSilent
+        return ok(action="saved", **row)
+    target = check_path_allowed(new_path)
+    ext = os.path.splitext(target)[1].lower()
+    if os.path.exists(target) and not overwrite:
+        return error("target_exists",
+                     "%s already exists — pass overwrite=True" % target)
+    if ext in _NEUTRAL_EXTENSIONS:
         doc.SaveAsSilent(target, False)
-        return ok(action="saved_as", target=target, **_doc_row(doc))
-    except PermissionError as exc:
-        return error("path_not_allowed", str(exc))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("save_failed", str(exc))
+        if not os.path.exists(target):
+            return error("export_failed",
+                         "SolidWorks reported success but wrote no file",
+                         target=target)
+        return ok(action="exported", target=target,
+                  bytes=os.path.getsize(target),
+                  note="neutral export — document path unchanged", **row)
+    doc.SaveAsSilent(target, False)
+    return ok(action="saved_as", target=target, **_doc_row(doc))
 
 
 @tool_guard("rebuild_failed")
@@ -292,6 +274,7 @@ def rebuild_document(path=None, force=False):
               needs_rebuild=needs_rebuild, **row)
 
 
+@tool_guard("import_failed")
 def import_file(path, save_as=None):
     """Import a neutral CAD file (STEP/IGES/Parasolid/ACIS/STL) as a part.
 
@@ -299,41 +282,36 @@ def import_file(path, save_as=None):
     deliberately out of scope (it belongs to parametric modeling toolkits); the
     imported solid lands as an imported body.
     """
-    try:
-        path = check_path_allowed(path)
-        if not os.path.exists(path):
-            return error("bad_input", "file not found: %s" % path)
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in _NEUTRAL_EXTENSIONS:
-            return error("bad_input",
-                         "not a neutral format: %s (supported: %s)"
-                         % (ext or "none", ", ".join(sorted(_NEUTRAL_EXTENSIONS))))
-        sw = get_sw()
-        from ..sw_session import _com, variant
+    path = check_path_allowed(path)
+    if not os.path.exists(path):
+        return error("bad_input", "file not found: %s" % path)
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _NEUTRAL_EXTENSIONS:
+        return error("bad_input",
+                     "not a neutral format: %s (supported: %s)"
+                     % (ext or "none", ", ".join(sorted(_NEUTRAL_EXTENSIONS))))
+    sw = get_sw()
+    from ..sw_session import _com, variant
 
-        pythoncom, _, _ = _com()
-        errors = variant(0, pythoncom.VT_BYREF | pythoncom.VT_I4)
-        doc = sw.LoadFile4(path, "r", None, errors)
-        try:
-            err = int(errors.value)
-        except Exception:
-            err = 0
-        if err:
-            return error("import_failed", "LoadFile4 returned error code %s" % err,
-                         path=path)
-        doc = doc if doc is not None else sw.ActiveDoc
-        if doc is None:
-            return error("import_failed", "LoadFile4 succeeded but produced no document")
-        row = _doc_row(doc)
-        if save_as:
-            target = check_path_allowed(save_as)
-            doc.SaveAsSilent(target, False)
-            row["saved_as"] = target
-        return ok(action="imported", source=path, **row)
-    except PermissionError as exc:
-        return error("path_not_allowed", str(exc))
-    except Exception as exc:
-        return error("import_failed", str(exc))
+    pythoncom, _, _ = _com()
+    errors = variant(0, pythoncom.VT_BYREF | pythoncom.VT_I4)
+    doc = sw.LoadFile4(path, "r", None, errors)
+    try:
+        err = int(errors.value)
+    except Exception:
+        err = 0
+    if err:
+        return error("import_failed", "LoadFile4 returned error code %s" % err,
+                     path=path)
+    doc = doc if doc is not None else sw.ActiveDoc
+    if doc is None:
+        return error("import_failed", "LoadFile4 succeeded but produced no document")
+    row = _doc_row(doc)
+    if save_as:
+        target = check_path_allowed(save_as)
+        doc.SaveAsSilent(target, False)
+        row["saved_as"] = target
+    return ok(action="imported", source=path, **row)
 
 
 @tool_guard("macro_failed")

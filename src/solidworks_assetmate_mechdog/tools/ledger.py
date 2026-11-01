@@ -201,6 +201,7 @@ def _classify(bbox_mm, has_flat_pattern, types):
     return "一般零件", "包围盒 %s" % (bbox_mm,)
 
 
+@tool_guard("ledger_failed")
 def build_feature_ledger(model_path, include_faces=True, config=None):
     """Build a structured ledger of features, dimensions, holes and model doubts.
 
@@ -217,142 +218,139 @@ def build_feature_ledger(model_path, include_faces=True, config=None):
         return error("bad_input", "Expected a .SLDPRT/.SLDASM, got %s" % os.path.basename(path))
 
     model = open_document(path)  # type inferred from extension: assemblies failed here
+    config_name = config
+    if not config_name:
+        try:
+            config_name = model.ConfigurationManager.ActiveConfiguration.Name
+        except Exception:
+            config_name = None
+
+    bbox_mm = None
     try:
-        config_name = config
-        if not config_name:
-            try:
-                config_name = model.ConfigurationManager.ActiveConfiguration.Name
-            except Exception:
-                config_name = None
+        b = list(model.GetPartBox(True))
+        bbox_mm = [round((b[3] - b[0]) * 1000, 2),
+                   round((b[4] - b[1]) * 1000, 2),
+                   round((b[5] - b[2]) * 1000, 2)]
+    except Exception:
+        pass
 
-        bbox_mm = None
+    features, holes, doubts, types = [], [], [], {}
+    has_flat_pattern = False
+    suppressed = []
+    index = 0
+    feature = model.FirstFeature
+    guard = 0
+    while feature is not None and guard < 800:
+        guard += 1
         try:
-            b = list(model.GetPartBox(True))
-            bbox_mm = [round((b[3] - b[0]) * 1000, 2),
-                       round((b[4] - b[1]) * 1000, 2),
-                       round((b[5] - b[2]) * 1000, 2)]
+            ftype = feature.GetTypeName2
+            fname = feature.Name
+            is_suppressed = bool(feature.IsSuppressed)
         except Exception:
-            pass
-
-        features, holes, doubts, types = [], [], [], {}
-        has_flat_pattern = False
-        suppressed = []
-        index = 0
-        feature = model.FirstFeature
-        guard = 0
-        while feature is not None and guard < 800:
-            guard += 1
-            try:
-                ftype = feature.GetTypeName2
-                fname = feature.Name
-                is_suppressed = bool(feature.IsSuppressed)
-            except Exception:
-                feature = feature.GetNextFeature
-                continue
-
-            if ftype in FOLDER_TYPES:
-                feature = feature.GetNextFeature
-                continue
-
-            types[ftype] = types.get(ftype, 0) + 1
-            if ftype == "FlatPattern":
-                has_flat_pattern = True
-            if is_suppressed:
-                suppressed.append(fname)
-
-            dims = _feature_dimensions(feature)
-            entry = {
-                "index": index,
-                "name": fname,
-                "type": ftype,
-                "suppressed": is_suppressed,
-                "dimensions": dims,
-            }
-
-            if include_faces and ftype in CUT_TYPES:
-                found = _cylindrical_faces(feature)
-                if found:
-                    entry["hole_candidates"] = found
-                    for hole in found:
-                        holes.append(dict(hole, feature=fname))
-
-            features.append(entry)
-            index += 1
             feature = feature.GetNextFeature
+            continue
 
-        try:
-            needs_rebuild = bool(model.Extension.NeedsRebuild2)
-            if needs_rebuild:
-                # A DRAWING edit (add/move/delete annotation) sets this flag on the
-                # referenced model without any model change, and the doubt then pulls the
-                # delivery verdict down for a defect that does not exist (reported
-                # 2026-11-01 against an untouched model). Force one rebuild and re-read:
-                # a real model change survives it, a drawing-induced flag does not.
-                try:
-                    from ..sw_session import call_method as _rebuild_once
+        if ftype in FOLDER_TYPES:
+            feature = feature.GetNextFeature
+            continue
 
-                    _rebuild_once(model, "EditRebuild3")
-                    needs_rebuild = bool(model.Extension.NeedsRebuild2)
-                except Exception:
-                    pass
-        except Exception:
-            needs_rebuild = None
+        types[ftype] = types.get(ftype, 0) + 1
+        if ftype == "FlatPattern":
+            has_flat_pattern = True
+        if is_suppressed:
+            suppressed.append(fname)
+
+        dims = _feature_dimensions(feature)
+        entry = {
+            "index": index,
+            "name": fname,
+            "type": ftype,
+            "suppressed": is_suppressed,
+            "dimensions": dims,
+        }
+
+        if include_faces and ftype in CUT_TYPES:
+            found = _cylindrical_faces(feature)
+            if found:
+                entry["hole_candidates"] = found
+                for hole in found:
+                    holes.append(dict(hole, feature=fname))
+
+        features.append(entry)
+        index += 1
+        feature = feature.GetNextFeature
+
+    try:
+        needs_rebuild = bool(model.Extension.NeedsRebuild2)
         if needs_rebuild:
-            doubts.append({"kind": "needs_rebuild",
-                           "detail": "模型存在待重建的改动，尺寸可能与实体不一致"})
-        if suppressed:
-            doubts.append({"kind": "suppressed_features", "detail": suppressed})
+            # A DRAWING edit (add/move/delete annotation) sets this flag on the
+            # referenced model without any model change, and the doubt then pulls the
+            # delivery verdict down for a defect that does not exist (reported
+            # 2026-11-01 against an untouched model). Force one rebuild and re-read:
+            # a real model change survives it, a drawing-induced flag does not.
+            try:
+                from ..sw_session import call_method as _rebuild_once
 
-        # Feature-scoped holes miss formed/imported ones, so merge a body-wide scan.
-        # Cylindrical faces include bores, bosses and bend fillets; only `inner` ones are
-        # reported as holes, the rest are counted so nothing disappears silently.
-        cylinders_total, inner_count = 0, 0
-        if include_faces:
-            seen = {_hole_key(h) for h in holes}
-            scanned = _body_cylinders(model)
-            cylinders_total = len(scanned)
-            # Keep every cylindrical face. Deciding bore vs boss vs bend fillet from the
-            # face normal proved unreliable here (all 80 faces classified the same way,
-            # contradicting the known holes), so no pre-filtering is applied.
-            for hole in scanned:
-                key = _hole_key(hole)
-                if key in seen:
-                    continue
-                seen.add(key)
-                holes.append(hole)
+                _rebuild_once(model, "EditRebuild3")
+                needs_rebuild = bool(model.Extension.NeedsRebuild2)
+            except Exception:
+                pass
+    except Exception:
+        needs_rebuild = None
+    if needs_rebuild:
+        doubts.append({"kind": "needs_rebuild",
+                       "detail": "模型存在待重建的改动，尺寸可能与实体不一致"})
+    if suppressed:
+        doubts.append({"kind": "suppressed_features", "detail": suppressed})
 
-        category, reason = _classify(bbox_mm or [0, 0, 0], has_flat_pattern, types)
+    # Feature-scoped holes miss formed/imported ones, so merge a body-wide scan.
+    # Cylindrical faces include bores, bosses and bend fillets; only `inner` ones are
+    # reported as holes, the rest are counted so nothing disappears silently.
+    cylinders_total, inner_count = 0, 0
+    if include_faces:
+        seen = {_hole_key(h) for h in holes}
+        scanned = _body_cylinders(model)
+        cylinders_total = len(scanned)
+        # Keep every cylindrical face. Deciding bore vs boss vs bend fillet from the
+        # face normal proved unreliable here (all 80 faces classified the same way,
+        # contradicting the known holes), so no pre-filtering is applied.
+        for hole in scanned:
+            key = _hole_key(hole)
+            if key in seen:
+                continue
+            seen.add(key)
+            holes.append(hole)
 
-        driving = sum(len(f["dimensions"]) for f in features)
-        return ok(
-            part=os.path.basename(path),
-            path=path,
-            config=config_name,
-            units="mm",
-            category=category,
-            category_reason=reason,
-            bbox_mm=bbox_mm,
-            material=_material_of(model),
-            features=features,
-            holes=holes,
-            doubts=doubts,
-            stats={
-                "features": len(features),
-                "driving_dimensions": driving,
-                "hole_candidates": len(holes),
-                "patterns": sum(v for k, v in types.items() if "Pattern" in k),
-                "cylinder_faces": cylinders_total,
-                "feature_types": types,
-            },
-            notes=[
-                "holes 是**全模型圆柱面清单**（直径/轴线/中心），不是孔清单：孔、凸台、"
-                "折弯圆角都在其中。判「是否孔」需结合入口面与轴线，工具不做推断。",
-                "非圆柱孔（异形孔、成型工具做的百叶窗、导入体上的孔）不在本表中，需人工核对。",
-                "驱动尺寸来自特征，草图内部尺寸与基准面偏移未计入。",
-            ],
-        )
-    except Exception as exc:
-        return error("ledger_failed", str(exc))
+    category, reason = _classify(bbox_mm or [0, 0, 0], has_flat_pattern, types)
+
+    driving = sum(len(f["dimensions"]) for f in features)
+    return ok(
+        part=os.path.basename(path),
+        path=path,
+        config=config_name,
+        units="mm",
+        category=category,
+        category_reason=reason,
+        bbox_mm=bbox_mm,
+        material=_material_of(model),
+        features=features,
+        holes=holes,
+        doubts=doubts,
+        stats={
+            "features": len(features),
+            "driving_dimensions": driving,
+            "hole_candidates": len(holes),
+            "patterns": sum(v for k, v in types.items() if "Pattern" in k),
+            "cylinder_faces": cylinders_total,
+            "feature_types": types,
+        },
+        notes=[
+            "holes 是**全模型圆柱面清单**（直径/轴线/中心），不是孔清单：孔、凸台、"
+            "折弯圆角都在其中。判「是否孔」需结合入口面与轴线，工具不做推断。",
+            "非圆柱孔（异形孔、成型工具做的百叶窗、导入体上的孔）不在本表中，需人工核对。",
+            "驱动尺寸来自特征，草图内部尺寸与基准面偏移未计入。",
+        ],
+    )
 
 
 @tool_guard("features_failed")

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-from ..sw_session import byref_dispatch_null, error, get_sw
+from ..sw_session import byref_dispatch_null, error, get_sw, tool_guard
 from .bom_native import default_template, populate_top_level_bom
 from .drawing import _open_drawing, _iter_views, drawing_ok, _save_drawing, GTOL_SYMBOLS  # noqa: F401
 
@@ -129,6 +129,7 @@ def _dodge_view_label(doc, view, gap_m=0.006, max_steps=12):
             "dimensions_moved": moved}
 
 
+@tool_guard("set_view_failed")
 def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True,
              break_alignment=False):
     """Move and/or rescale one view. Coordinates are sheet metres.
@@ -141,142 +142,137 @@ def set_view(drawing_path, view_name, x_m=None, y_m=None, scale=None, save=True,
     `position_after_m` and `aligned_to_parent` separately — previously it just said ok:true
     while quietly moving y, and a reporter needed two rounds to notice.
     """
+    import pythoncom
+    from win32com.client import VARIANT
+
+    doc = _open_drawing(drawing_path)
+    target = None
+    for view in _iter_views(doc):
+        if getattr(view, "Type", None) == 1:
+            continue
+        if view.Name == view_name:
+            target = view
+            break
+    if target is None:
+        names = [v.Name for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
+        return error("view_not_found", "no view named %r" % view_name,
+                     "Available: %s" % ", ".join(names))
+
+    # P1-7: a section view is locked to its parent along one axis, so the requested
+    # coordinate comes back "corrected" and multi-view layout gets stuck in a narrow
+    # strip beside the parent. IView.RemoveAlignment is the UI's 解除对齐; note it only
+    # clears THIS view's alignment, not what its children inherit.
+    alignment_broken = False
+    if break_alignment:
+        try:
+            _call_method(target, "RemoveAlignment")
+            alignment_broken = True
+        except Exception:
+            alignment_broken = False
+
+    requested = None
+    if x_m is not None and y_m is not None:
+        requested = [round(float(x_m), 4), round(float(y_m), 4)]
+        _prop_put(target, "Position",
+                  VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8,
+                          [float(x_m), float(y_m)]))
+    if scale is not None:
+        _prop_put(target, "ScaleDecimal", float(scale))
     try:
-        import pythoncom
-        from win32com.client import VARIANT
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        doc.GraphicsRedraw2
+    except Exception:
+        pass
 
-        doc = _open_drawing(drawing_path)
-        target = None
-        for view in _iter_views(doc):
-            if getattr(view, "Type", None) == 1:
-                continue
-            if view.Name == view_name:
-                target = view
-                break
-        if target is None:
-            names = [v.Name for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
-            return error("view_not_found", "no view named %r" % view_name,
-                         "Available: %s" % ", ".join(names))
-
-        # P1-7: a section view is locked to its parent along one axis, so the requested
-        # coordinate comes back "corrected" and multi-view layout gets stuck in a narrow
-        # strip beside the parent. IView.RemoveAlignment is the UI's 解除对齐; note it only
-        # clears THIS view's alignment, not what its children inherit.
-        alignment_broken = False
-        if break_alignment:
-            try:
-                _call_method(target, "RemoveAlignment")
-                alignment_broken = True
-            except Exception:
-                alignment_broken = False
-
-        requested = None
-        if x_m is not None and y_m is not None:
-            requested = [round(float(x_m), 4), round(float(y_m), 4)]
-            _prop_put(target, "Position",
-                      VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8,
-                              [float(x_m), float(y_m)]))
-        if scale is not None:
-            _prop_put(target, "ScaleDecimal", float(scale))
+    # Read back AFTER the rebuild. Section/detail views keep projection alignment
+    # with their parent, so SolidWorks may have moved the view away from the
+    # requested position. P2-12: report requested vs applied separately instead of
+    # only saying ok:true while quietly changing y.
+    applied = {"view": view_name, "position_m": None, "scale": None}
+    position_after = None
+    try:
+        position_after = [round(v, 4) for v in target.Position]
+    except Exception:
+        pass
+    if x_m is not None and y_m is not None:
+        applied["position_m"] = position_after
+    if scale is not None:
         try:
-            _call_method(doc, "EditRebuild3")
+            applied["scale"] = float(target.ScaleDecimal)
         except Exception:
             pass
+    # P1-9: a scale change regenerates the view label at a SW-chosen spot; move this
+    # view's dimensions off it before the caller sees the result.
+    label_dodge = None
+    if scale is not None:
         try:
-            doc.GraphicsRedraw2
-        except Exception:
-            pass
-
-        # Read back AFTER the rebuild. Section/detail views keep projection alignment
-        # with their parent, so SolidWorks may have moved the view away from the
-        # requested position. P2-12: report requested vs applied separately instead of
-        # only saying ok:true while quietly changing y.
-        applied = {"view": view_name, "position_m": None, "scale": None}
-        position_after = None
-        try:
-            position_after = [round(v, 4) for v in target.Position]
-        except Exception:
-            pass
-        if x_m is not None and y_m is not None:
-            applied["position_m"] = position_after
-        if scale is not None:
-            try:
-                applied["scale"] = float(target.ScaleDecimal)
-            except Exception:
-                pass
-        # P1-9: a scale change regenerates the view label at a SW-chosen spot; move this
-        # view's dimensions off it before the caller sees the result.
-        label_dodge = None
-        if scale is not None:
-            try:
-                label_dodge = _dodge_view_label(doc, target)
-                if label_dodge and label_dodge.get("dimensions_moved"):
-                    _call_method(doc, "EditRebuild3")
-                    try:
-                        doc.GraphicsRedraw2
-                    except Exception:
-                        pass
-            except Exception:
-                label_dodge = None
-        aligned = bool(
-            requested is not None and position_after is not None
-            and (abs(position_after[0] - requested[0]) > 1e-4
-                 or abs(position_after[1] - requested[1]) > 1e-4)
-        )
-        if save:
-            _save_drawing(doc)
-        # P0-3: moving a PARENT view does not carry its section cut lines with it — the
-        # cut line lives in the parent's sketch, and SolidWorks leaves it at the old sheet
-        # coordinates, so the section loses its cutting basis while still looking valid.
-        # The report paid for this twice (rebuild the section -> lose that view's
-        # dimensions). We cannot move the sketch from here, so say it before saving.
-        children = []
-        # NOTE: this used to reuse `aligned`, which means "the applied position does NOT
-        # match the request" — so a view that moved exactly where asked skipped the check
-        # and reported no derived views. Ask instead: did the caller request a position?
-        if requested is not None and position_after is not None:
-            import win32com.client as _win
-
-            for other in _iter_views(doc):
-                if getattr(other, "Type", None) == 1:
-                    continue
+            label_dodge = _dodge_view_label(doc, target)
+            if label_dodge and label_dodge.get("dimensions_moved"):
+                _call_method(doc, "EditRebuild3")
                 try:
-                    if str(other.Name) == str(view_name):
-                        continue
-                    # `GetBaseView` is a PROPERTY that returns a raw PyIDispatch: reading
-                    # `.Name` straight off it fails and the exception was being swallowed,
-                    # so this check silently always reported "no derived views" (measured
-                    # 2026-10-31: a section view does answer 工程图视图1 once dispatched).
-                    base = other.GetBaseView
-                    if base is None:
-                        continue
-                    if str(_win.Dispatch(base).Name) == str(view_name):
-                        children.append(str(other.Name))
+                    doc.GraphicsRedraw2
                 except Exception:
+                    pass
+        except Exception:
+            label_dodge = None
+    aligned = bool(
+        requested is not None and position_after is not None
+        and (abs(position_after[0] - requested[0]) > 1e-4
+             or abs(position_after[1] - requested[1]) > 1e-4)
+    )
+    if save:
+        _save_drawing(doc)
+    # P0-3: moving a PARENT view does not carry its section cut lines with it — the
+    # cut line lives in the parent's sketch, and SolidWorks leaves it at the old sheet
+    # coordinates, so the section loses its cutting basis while still looking valid.
+    # The report paid for this twice (rebuild the section -> lose that view's
+    # dimensions). We cannot move the sketch from here, so say it before saving.
+    children = []
+    # NOTE: this used to reuse `aligned`, which means "the applied position does NOT
+    # match the request" — so a view that moved exactly where asked skipped the check
+    # and reported no derived views. Ask instead: did the caller request a position?
+    if requested is not None and position_after is not None:
+        import win32com.client as _win
+
+        for other in _iter_views(doc):
+            if getattr(other, "Type", None) == 1:
+                continue
+            try:
+                if str(other.Name) == str(view_name):
                     continue
-        return drawing_ok(
-            drawing=doc.GetTitle,
-            requested=requested,
-            position_after_m=position_after,
-            aligned_to_parent=aligned,
-            alignment_reason=("section/detail views keep projection alignment with the "
-                              "parent view" if aligned else None),
-            # P1-9: what the label did, and how many dimensions had to move off it.
-            view_label=label_dodge,
-            alignment_broken=alignment_broken,
-            # P0-3: empty list means no derived views (detail/section) reference this one.
-            derived_views=children,
-            cut_lines_detached_warning=(
-                "本视图有派生视图 %r：切割线/边界草图不会随父视图平移，"
-                "请用 export_drawing + render_drawing 复核剖面位置，"
-                "或重建剖面（重建会丢该视图上已插入的尺寸）。" % children
-                if children else None),
-            **applied,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("set_view_failed", str(exc))
+                # `GetBaseView` is a PROPERTY that returns a raw PyIDispatch: reading
+                # `.Name` straight off it fails and the exception was being swallowed,
+                # so this check silently always reported "no derived views" (measured
+                # 2026-10-31: a section view does answer 工程图视图1 once dispatched).
+                base = other.GetBaseView
+                if base is None:
+                    continue
+                if str(_win.Dispatch(base).Name) == str(view_name):
+                    children.append(str(other.Name))
+            except Exception:
+                continue
+    return drawing_ok(
+        drawing=doc.GetTitle,
+        requested=requested,
+        position_after_m=position_after,
+        aligned_to_parent=aligned,
+        alignment_reason=("section/detail views keep projection alignment with the "
+                          "parent view" if aligned else None),
+        # P1-9: what the label did, and how many dimensions had to move off it.
+        view_label=label_dodge,
+        alignment_broken=alignment_broken,
+        # P0-3: empty list means no derived views (detail/section) reference this one.
+        derived_views=children,
+        cut_lines_detached_warning=(
+            "本视图有派生视图 %r：切割线/边界草图不会随父视图平移，"
+            "请用 export_drawing + render_drawing 复核剖面位置，"
+            "或重建剖面（重建会丢该视图上已插入的尺寸）。" % children
+            if children else None),
+        **applied,
+    )
 
 
 def place_views(drawing_path, placements, save=True):
@@ -315,6 +311,7 @@ def place_views(drawing_path, placements, save=True):
     return drawing_ok(placed=ok_count, total=len(results), results=results)
 
 
+@tool_guard("delete_dimensions_failed")
 def delete_dimensions(drawing_path, keep_values=None, view_name=None,
                       keep_tolerance_mm=0.05, save=True):
     """Delete dimensions whose value is not in keep_values.
@@ -325,96 +322,91 @@ def delete_dimensions(drawing_path, keep_values=None, view_name=None,
     job that takes seconds. This batches the loop and reports what was removed, so a
     49-dimension sheet can be reduced to the planned shortlist without hand-written COM.
     """
-    try:
-        import win32com.client as win
+    import win32com.client as win
 
-        doc = _open_drawing(drawing_path)
-        keep = sorted(float(v) for v in (keep_values or []))
-        removed, kept, failed = [], [], []
-        rows = []
-        for view in _iter_views(doc):
-            if getattr(view, "Type", None) == 1:
-                continue
-            if view_name and view.Name != view_name:
-                continue
+    doc = _open_drawing(drawing_path)
+    keep = sorted(float(v) for v in (keep_values or []))
+    removed, kept, failed = [], [], []
+    rows = []
+    for view in _iter_views(doc):
+        if getattr(view, "Type", None) == 1:
+            continue
+        if view_name and view.Name != view_name:
+            continue
+        try:
+            items = list(view.GetAnnotations or ())
+        except Exception:
+            continue
+        for item in items:
             try:
-                items = list(view.GetAnnotations or ())
+                ann = win.Dispatch(item)
+                if int(ann.GetType) != 4:
+                    continue
+                specific = ann.GetSpecificAnnotation
+                dim = specific.GetDimension2(0)
+                if dim is None:
+                    continue
+                value = round(float(dim.SystemValue) * 1000, 3)
+                rows.append((view, ann, value))
             except Exception:
                 continue
-            for item in items:
-                try:
-                    ann = win.Dispatch(item)
-                    if int(ann.GetType) != 4:
-                        continue
-                    specific = ann.GetSpecificAnnotation
-                    dim = specific.GetDimension2(0)
-                    if dim is None:
-                        continue
-                    value = round(float(dim.SystemValue) * 1000, 3)
-                    rows.append((view, ann, value))
-                except Exception:
-                    continue
 
-        for view, ann, value in rows:
-            if keep and any(abs(value - target) <= keep_tolerance_mm for target in keep):
-                kept.append({"value_mm": value, "name": str(ann.GetName)})
-                continue
+    for view, ann, value in rows:
+        if keep and any(abs(value - target) <= keep_tolerance_mm for target in keep):
+            kept.append({"value_mm": value, "name": str(ann.GetName)})
+            continue
+        try:
+            position = list(ann.GetPosition)
+            name = str(ann.GetName)
+            doc.ClearSelection2(True)
             try:
-                position = list(ann.GetPosition)
-                name = str(ann.GetName)
-                doc.ClearSelection2(True)
+                doc.ActivateView(view.Name)
+            except Exception:
+                pass
+            # SelectByID2 with an empty Name returns False for dimensions; the annotation
+            # name is what actually selects it. Position is kept as a fallback for builds
+            # where the name differs from the selection name.
+            selected = False
+            # The Callout argument must be a byref null VARIANT; passing None raises
+            # 'type mismatch' and SelectByID2 returns False (quirk section 3).
+            callout = byref_dispatch_null()
+            for candidate, px, py, pz in ((name, 0.0, 0.0, 0.0),
+                                          (name + "@" + view.Name, 0.0, 0.0, 0.0),
+                                          ("", position[0], position[1], position[2])):
                 try:
-                    doc.ActivateView(view.Name)
+                    if doc.Extension.SelectByID2(candidate, "DIMENSION", px, py, pz,
+                                                 False, 0, callout, 0):
+                        selected = True
+                        break
                 except Exception:
-                    pass
-                # SelectByID2 with an empty Name returns False for dimensions; the annotation
-                # name is what actually selects it. Position is kept as a fallback for builds
-                # where the name differs from the selection name.
-                selected = False
-                # The Callout argument must be a byref null VARIANT; passing None raises
-                # 'type mismatch' and SelectByID2 returns False (quirk section 3).
-                callout = byref_dispatch_null()
-                for candidate, px, py, pz in ((name, 0.0, 0.0, 0.0),
-                                              (name + "@" + view.Name, 0.0, 0.0, 0.0),
-                                              ("", position[0], position[1], position[2])):
-                    try:
-                        if doc.Extension.SelectByID2(candidate, "DIMENSION", px, py, pz,
-                                                     False, 0, callout, 0):
-                            selected = True
-                            break
-                    except Exception:
-                        continue
-                if not selected:
-                    failed.append({"value_mm": value, "reason": "select failed",
-                                   "name": name})
                     continue
-                doc.EditDelete()
-                removed.append({"value_mm": value, "name": name})
-            except Exception as exc:
-                failed.append({"value_mm": value, "reason": str(exc)[:80]})
+            if not selected:
+                failed.append({"value_mm": value, "reason": "select failed",
+                               "name": name})
+                continue
+            doc.EditDelete()
+            removed.append({"value_mm": value, "name": name})
+        except Exception as exc:
+            failed.append({"value_mm": value, "reason": str(exc)[:80]})
 
-        doc.ClearSelection2(True)
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        try:
-            doc.GraphicsRedraw2
-        except Exception:
-            pass
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(
-            drawing=doc.GetTitle,
-            removed=len(removed), kept=len(kept), failed=len(failed),
-            removed_items=removed[:40], kept_values=[k["value_mm"] for k in kept][:40],
-            failed_items=failed[:10],
-            note="按值保留（默认容差 0.05 mm）。SolidWorks 无批量删除接口；实测 14 条一次调用 < 5 s。",
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("delete_dimensions_failed", str(exc))
+    doc.ClearSelection2(True)
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        doc.GraphicsRedraw2
+    except Exception:
+        pass
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(
+        drawing=doc.GetTitle,
+        removed=len(removed), kept=len(kept), failed=len(failed),
+        removed_items=removed[:40], kept_values=[k["value_mm"] for k in kept][:40],
+        failed_items=failed[:10],
+        note="按值保留（默认容差 0.05 mm）。SolidWorks 无批量删除接口；实测 14 条一次调用 < 5 s。",
+    )
 
 
 def _note_bbox(text, x, y, height_m):
@@ -434,6 +426,7 @@ def _boxes_overlap(a, b, pad=0.0):
             and a[1] - pad < b[3] and b[1] - pad < a[3])
 
 
+@tool_guard("note_failed")
 def add_note(drawing_path, text, x_m, y_m, height_mm=None, bold=False, save=True,
              avoid_collisions=False):
     """Add a drawing note (技术要求 lines). x/y are sheet metres.
@@ -447,96 +440,92 @@ def add_note(drawing_path, text, x_m, y_m, height_mm=None, bold=False, save=True
     it failed. The note box is estimated from line count and height; views are taken from
     `precise_outline`, so the 11.9 mm phantom margin does not push notes away for no reason.
     """
+    doc = _open_drawing(drawing_path)
+    doc.ClearSelection2(True)
+
+    collisions_avoided = 0
+    position_requested = [round(float(x_m), 4), round(float(y_m), 4)]
+    if avoid_collisions:
+        from .drawing import precise_outline
+
+        height_m = (float(height_mm) / 1000.0) if height_mm else 0.0035
+        obstacles = []
+        for view in _iter_views(doc):
+            if getattr(view, "Type", None) == 1:
+                continue
+            box = precise_outline(view)
+            if box:
+                obstacles.append(box)
+        while collisions_avoided < 24:
+            box = _note_bbox(text, x_m, y_m, height_m)
+            if not any(_boxes_overlap(box, obstacle, pad=0.002)
+                       for obstacle in obstacles):
+                break
+            step = (box[3] - box[1]) + 0.004
+            if float(y_m) - step < 0.02:
+                break
+            y_m = float(y_m) - step
+            collisions_avoided += 1
+
+    created = doc.InsertNote(str(text))
+    if created is None:
+        return error("note_failed", "InsertNote returned null",
+                     "Some templates refuse notes while a view is active; activate the sheet first.")
+    note = created
     try:
-        doc = _open_drawing(drawing_path)
-        doc.ClearSelection2(True)
+        annotation = _call_method(note, "GetAnnotation")
+        import win32com.client as win
 
-        collisions_avoided = 0
-        position_requested = [round(float(x_m), 4), round(float(y_m), 4)]
-        if avoid_collisions:
-            from .drawing import precise_outline
-
-            height_m = (float(height_mm) / 1000.0) if height_mm else 0.0035
-            obstacles = []
-            for view in _iter_views(doc):
-                if getattr(view, "Type", None) == 1:
-                    continue
-                box = precise_outline(view)
-                if box:
-                    obstacles.append(box)
-            while collisions_avoided < 24:
-                box = _note_bbox(text, x_m, y_m, height_m)
-                if not any(_boxes_overlap(box, obstacle, pad=0.002)
-                           for obstacle in obstacles):
-                    break
-                step = (box[3] - box[1]) + 0.004
-                if float(y_m) - step < 0.02:
-                    break
-                y_m = float(y_m) - step
-                collisions_avoided += 1
-
-        created = doc.InsertNote(str(text))
-        if created is None:
-            return error("note_failed", "InsertNote returned null",
-                         "Some templates refuse notes while a view is active; activate the sheet first.")
-        note = created
+        annotation = win.Dispatch(annotation)
+        _call_method(annotation, "SetPosition2", float(x_m), float(y_m), 0.0)
+    except Exception:
+        pass
+    if height_mm:
         try:
-            annotation = _call_method(note, "GetAnnotation")
-            import win32com.client as win
-
-            annotation = win.Dispatch(annotation)
-            _call_method(annotation, "SetPosition2", float(x_m), float(y_m), 0.0)
+            note.SetHeight(float(height_mm) / 1000.0)
         except Exception:
-            pass
-        if height_mm:
             try:
-                note.SetHeight(float(height_mm) / 1000.0)
-            except Exception:
-                try:
-                    _call_method(note, "SetHeight", float(height_mm) / 1000.0)
-                except Exception:
-                    pass
-        if bold:
-            try:
-                note.SetBold(True)
+                _call_method(note, "SetHeight", float(height_mm) / 1000.0)
             except Exception:
                 pass
+    if bold:
         try:
-            _call_method(doc, "EditRebuild3")
+            note.SetBold(True)
         except Exception:
             pass
-        try:
-            doc.GraphicsRedraw2
-        except Exception:
-            pass
-        if save:
-            _save_drawing(doc)
-        name = None
-        try:
-            name = str(_call_method(note, "GetAnnotation").GetName)
-        except Exception:
-            pass
-        # P1-5: report the box the note actually occupies. A multi-line note shifted by
-        # 49 mm looked identical to one shifted by 4 mm in the old receipt — only
-        # `adjusted: true` — so the caller could not tell whether it now sat on a view or
-        # the title block.
-        final_bbox = _note_bbox(str(text), float(x_m), float(y_m),
-                                (float(height_mm) / 1000.0) if height_mm else 0.0035)
-        return drawing_ok(drawing=doc.GetTitle, note=name, text=str(text),
-                          position_m=[round(float(x_m), 4), round(float(y_m), 4)],
-                          position_requested_m=position_requested,
-                          adjusted=bool(collisions_avoided),
-                          collisions_avoided=collisions_avoided,
-                          bbox_final=[round(v, 4) for v in final_bbox],
-                          shifted_m=([round(float(x_m) - position_requested[0], 4),
-                                      round(float(y_m) - position_requested[1], 4)]
-                                     if collisions_avoided else [0.0, 0.0]))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("note_failed", str(exc))
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        doc.GraphicsRedraw2
+    except Exception:
+        pass
+    if save:
+        _save_drawing(doc)
+    name = None
+    try:
+        name = str(_call_method(note, "GetAnnotation").GetName)
+    except Exception:
+        pass
+    # P1-5: report the box the note actually occupies. A multi-line note shifted by
+    # 49 mm looked identical to one shifted by 4 mm in the old receipt — only
+    # `adjusted: true` — so the caller could not tell whether it now sat on a view or
+    # the title block.
+    final_bbox = _note_bbox(str(text), float(x_m), float(y_m),
+                            (float(height_mm) / 1000.0) if height_mm else 0.0035)
+    return drawing_ok(drawing=doc.GetTitle, note=name, text=str(text),
+                      position_m=[round(float(x_m), 4), round(float(y_m), 4)],
+                      position_requested_m=position_requested,
+                      adjusted=bool(collisions_avoided),
+                      collisions_avoided=collisions_avoided,
+                      bbox_final=[round(v, 4) for v in final_bbox],
+                      shifted_m=([round(float(x_m) - position_requested[0], 4),
+                                  round(float(y_m) - position_requested[1], 4)]
+                                 if collisions_avoided else [0.0, 0.0]))
 
 
+@tool_guard("balloon_failed")
 def add_balloon(drawing_path, view_name, x_m, y_m, text=None, item_number=None,
                 leader_x_m=None, leader_y_m=None, save=True):
     """Add a BOM balloon to a view.
@@ -544,86 +533,82 @@ def add_balloon(drawing_path, view_name, x_m, y_m, text=None, item_number=None,
     Uses InsertBOMBalloon2 when an item number is known (attaches to the component under
     the point); otherwise inserts a plain balloon with the given text.
     """
-    try:
-        doc = _open_drawing(drawing_path)
-        target = None
-        for view in _iter_views(doc):
-            if getattr(view, "Type", None) != 1 and view.Name == view_name:
-                target = view
-                break
-        if target is None:
-            return error("view_not_found", "no view named %r" % view_name)
-        doc.ActivateView(target.Name)
-        doc.ClearSelection2(True)
-        # Both entry points go through call_method: direct attribute access on this binding
-        # raises for some of them, and one user report on SW2026 shows `InsertBalloon`
-        # resolving to nothing at all (DISP_E_UNKNOWNNAME) — i.e. renamed or removed in
-        # that version. Reported honestly rather than hidden behind a bare except.
-        balloon_error = None
-        ballon = None
-        if item_number is not None:
-            for attempt in (5, 4, 3):
-                try:
-                    args = [item_number] + [0] * (attempt - 1)
-                    if attempt == 5:
-                        args[-1] = 0.0
-                    ballon = _call_method(doc, "InsertBOMBalloon2", *args)
-                    if ballon is not None:
-                        break
-                except Exception as exc:
-                    balloon_error = "%s(%d args): %s" % ("InsertBOMBalloon2", attempt,
-                                                         str(exc)[:60])
-        if ballon is None:
-            # `InsertBalloon` does not exist on this binding at all (GetIDsOfNames: False on
-            # SW2024 SP4, DISP_E_UNKNOWNNAME on SW2026 per a user report). `InsertBOMBalloon`
-            # and `InsertBOMBalloon2` do. Try the older entry point before giving up.
-            for api in ("InsertBOMBalloon", "InsertBalloon"):
-                try:
-                    ballon = _call_method(doc, api, 0, 0, 0,
-                                          float(x_m), float(y_m),
-                                          float(leader_x_m or x_m),
-                                          float(leader_y_m or y_m))
-                    if ballon is not None:
-                        balloon_error = None
-                        break
-                except Exception as exc:
-                    balloon_error = "%s; %s: %s" % (balloon_error or "no callout",
-                                                    api, str(exc)[:60])
-        if ballon is None:
-            return error("balloon_failed",
-                         "no balloon could be created",
-                         "%s | Verified on SW2024 SP4 only; a SW2026 report shows "
-                         "InsertBalloon as DISP_E_UNKNOWNNAME (renamed or removed there)."
-                         % (balloon_error or "both entry points returned null"))
-        applied_text = None
-        if text:
+    doc = _open_drawing(drawing_path)
+    target = None
+    for view in _iter_views(doc):
+        if getattr(view, "Type", None) != 1 and view.Name == view_name:
+            target = view
+            break
+    if target is None:
+        return error("view_not_found", "no view named %r" % view_name)
+    doc.ActivateView(target.Name)
+    doc.ClearSelection2(True)
+    # Both entry points go through call_method: direct attribute access on this binding
+    # raises for some of them, and one user report on SW2026 shows `InsertBalloon`
+    # resolving to nothing at all (DISP_E_UNKNOWNNAME) — i.e. renamed or removed in
+    # that version. Reported honestly rather than hidden behind a bare except.
+    balloon_error = None
+    ballon = None
+    if item_number is not None:
+        for attempt in (5, 4, 3):
             try:
-                ballon.SetText(str(text))
+                args = [item_number] + [0] * (attempt - 1)
+                if attempt == 5:
+                    args[-1] = 0.0
+                ballon = _call_method(doc, "InsertBOMBalloon2", *args)
+                if ballon is not None:
+                    break
+            except Exception as exc:
+                balloon_error = "%s(%d args): %s" % ("InsertBOMBalloon2", attempt,
+                                                     str(exc)[:60])
+    if ballon is None:
+        # `InsertBalloon` does not exist on this binding at all (GetIDsOfNames: False on
+        # SW2024 SP4, DISP_E_UNKNOWNNAME on SW2026 per a user report). `InsertBOMBalloon`
+        # and `InsertBOMBalloon2` do. Try the older entry point before giving up.
+        for api in ("InsertBOMBalloon", "InsertBalloon"):
+            try:
+                ballon = _call_method(doc, api, 0, 0, 0,
+                                      float(x_m), float(y_m),
+                                      float(leader_x_m or x_m),
+                                      float(leader_y_m or y_m))
+                if ballon is not None:
+                    balloon_error = None
+                    break
+            except Exception as exc:
+                balloon_error = "%s; %s: %s" % (balloon_error or "no callout",
+                                                api, str(exc)[:60])
+    if ballon is None:
+        return error("balloon_failed",
+                     "no balloon could be created",
+                     "%s | Verified on SW2024 SP4 only; a SW2026 report shows "
+                     "InsertBalloon as DISP_E_UNKNOWNNAME (renamed or removed there)."
+                     % (balloon_error or "both entry points returned null"))
+    applied_text = None
+    if text:
+        try:
+            ballon.SetText(str(text))
+            applied_text = str(text)
+        except Exception:
+            try:
+                _call_method(ballon, "SetText", str(text))
                 applied_text = str(text)
             except Exception:
-                try:
-                    _call_method(ballon, "SetText", str(text))
-                    applied_text = str(text)
-                except Exception:
-                    pass
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        try:
-            doc.GraphicsRedraw2
-        except Exception:
-            pass
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(drawing=doc.GetTitle, view=target.Name, text=applied_text,
-                          item_number=item_number)
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("balloon_failed", str(exc))
+                pass
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        doc.GraphicsRedraw2
+    except Exception:
+        pass
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(drawing=doc.GetTitle, view=target.Name, text=applied_text,
+                      item_number=item_number)
 
 
+@tool_guard("sheet_line_failed")
 def add_sheet_line(drawing_path, x1_m, y1_m, x2_m, y2_m, save=True):
     """Draw a line in TRUE sheet space.
 
@@ -633,45 +618,41 @@ def add_sheet_line(drawing_path, x1_m, y1_m, x2_m, y2_m, save=True):
     requested sheet point through the sheet's own transform, which is the only way to get
     the line where it was asked for.
     """
+    doc = _open_drawing(drawing_path)
+    sheet = doc.GetFirstView
     try:
-        doc = _open_drawing(drawing_path)
-        sheet = doc.GetFirstView
-        try:
-            doc.ActivateSheet(doc.GetCurrentSheet().GetName)
-        except Exception:
-            pass
-        doc.ClearSelection2(True)
-        try:
-            doc.InsertSketch()
-        except Exception:
-            pass
-        sketch = doc.SketchManager
-        # Sheet space -> sketch space: a drawing sketch is placed at the sheet origin, so
-        # sheet metres are already the right unit. Passing millimetres is what produced the
-        # scaled fan of lines.
-        sketch.CreateLine(float(x1_m), float(y1_m), 0.0,
-                          float(x2_m), float(y2_m), 0.0)
-        sketch.InsertSketch(True)
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        try:
-            doc.GraphicsRedraw2
-        except Exception:
-            pass
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(drawing=doc.GetTitle,
-                          line_m=[[round(float(x1_m), 4), round(float(y1_m), 4)],
-                                  [round(float(x2_m), 4), round(float(y2_m), 4)]],
-                          note="坐标为图纸空间米；图纸草图不接受毫米。")
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("sheet_line_failed", str(exc))
+        doc.ActivateSheet(doc.GetCurrentSheet().GetName)
+    except Exception:
+        pass
+    doc.ClearSelection2(True)
+    try:
+        doc.InsertSketch()
+    except Exception:
+        pass
+    sketch = doc.SketchManager
+    # Sheet space -> sketch space: a drawing sketch is placed at the sheet origin, so
+    # sheet metres are already the right unit. Passing millimetres is what produced the
+    # scaled fan of lines.
+    sketch.CreateLine(float(x1_m), float(y1_m), 0.0,
+                      float(x2_m), float(y2_m), 0.0)
+    sketch.InsertSketch(True)
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        doc.GraphicsRedraw2
+    except Exception:
+        pass
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(drawing=doc.GetTitle,
+                      line_m=[[round(float(x1_m), 4), round(float(y1_m), 4)],
+                              [round(float(x2_m), 4), round(float(y2_m), 4)]],
+                      note="坐标为图纸空间米；图纸草图不接受毫米。")
 
 
+@tool_guard("bom_table_failed")
 def add_bom_table(drawing_path, view_name=None, configuration="Default",
                   template=None, save=True):
     """Insert a POPULATED native TopLevelOnly BOM into an assembly drawing.
@@ -694,51 +675,46 @@ def add_bom_table(drawing_path, view_name=None, configuration="Default",
     Do NOT try to add a quantity column via SetColumnType — SOLIDWORKS forbids promoting a
     normal column to Quantity (SetColumnType2(..., 203, ...) returns False).
     """
-    try:
-        from ..sw_session import error, get_sw
+    from ..sw_session import error, get_sw
 
-        doc = _open_drawing(drawing_path)
-        sw = get_sw()
-        template = template or default_template(sw)
-        if not os.path.exists(template):
-            return error("template_missing", "BOM template not found: %s" % template)
+    doc = _open_drawing(drawing_path)
+    sw = get_sw()
+    template = template or default_template(sw)
+    if not os.path.exists(template):
+        return error("template_missing", "BOM template not found: %s" % template)
 
-        views = [v for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
-        if not views:
-            return error("no_views", "drawing has no model views")
-        target = views[0]
-        if view_name:
-            target = next((v for v in views if v.Name == view_name), None)
-            if target is None:
-                return error("view_not_found", "no view named %r" % view_name)
+    views = [v for v in _iter_views(doc) if getattr(v, "Type", None) != 1]
+    if not views:
+        return error("no_views", "drawing has no model views")
+    target = views[0]
+    if view_name:
+        target = next((v for v in views if v.Name == view_name), None)
+        if target is None:
+            return error("view_not_found", "no view named %r" % view_name)
 
-        configuration = configuration or getattr(target, "ReferencedConfiguration", "Default")
+    configuration = configuration or getattr(target, "ReferencedConfiguration", "Default")
 
-        result = populate_top_level_bom(
-            doc, target, template,
-            configuration=configuration or "Default",
-        )
-        if save:
-            _save_drawing(doc)
+    result = populate_top_level_bom(
+        doc, target, template,
+        configuration=configuration or "Default",
+    )
+    if save:
+        _save_drawing(doc)
 
-        return drawing_ok(
-            drawing=doc.GetTitle,
-            created=True,
-            native_bom=True,
-            populated=True,
-            rows=result["rows"],
-            columns=result["columns"],
-            data_rows=result["data_rows"],
-            headers=result["headers"],
-            table_type=result["table_type"],
-            referenced_model=result["referenced_model"],
-            sample_data=result["data"][:3],
-            saved=bool(save),
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("bom_table_failed", str(exc))
+    return drawing_ok(
+        drawing=doc.GetTitle,
+        created=True,
+        native_bom=True,
+        populated=True,
+        rows=result["rows"],
+        columns=result["columns"],
+        data_rows=result["data_rows"],
+        headers=result["headers"],
+        table_type=result["table_type"],
+        referenced_model=result["referenced_model"],
+        sample_data=result["data"][:3],
+        saved=bool(save),
+    )
 
 
 
@@ -839,47 +815,44 @@ def _select_by_name(doc, name, select_type, byref_dispatch_null):
         return ok_selected
 
 
+@tool_guard("delete_view_failed")
 def delete_view(drawing_path, view_name, save=True):
     """Delete a drawing view (wrong section, empty detail, stray projection).
 
     Without this, a single wrong `add_section_view` forces rebuilding the entire sheet.
     """
+    from ..sw_session import byref_dispatch_null, error, get_sw
+
+    doc = _open_drawing(drawing_path)
+    before = [str(v.Name) for v in _iter_views(doc)
+              if getattr(v, "Type", None) != 1]
+    if view_name not in before:
+        return error("view_not_found",
+                     "no model view named %r" % view_name,
+                     "available: %s" % ", ".join(before))
+    doc.ClearSelection2(True)
+    if not _select_by_name(doc, view_name, "DRAWINGVIEW", byref_dispatch_null):
+        return error("select_failed",
+                     "SelectByID2 could not select %r as DRAWINGVIEW" % view_name)
+    _call_method(doc, "EditDelete")
     try:
-        from ..sw_session import byref_dispatch_null, error, get_sw
-
-        doc = _open_drawing(drawing_path)
-        before = [str(v.Name) for v in _iter_views(doc)
-                  if getattr(v, "Type", None) != 1]
-        if view_name not in before:
-            return error("view_not_found",
-                         "no model view named %r" % view_name,
-                         "available: %s" % ", ".join(before))
-        doc.ClearSelection2(True)
-        if not _select_by_name(doc, view_name, "DRAWINGVIEW", byref_dispatch_null):
-            return error("select_failed",
-                         "SelectByID2 could not select %r as DRAWINGVIEW" % view_name)
-        _call_method(doc, "EditDelete")
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        after = [str(v.Name) for v in _iter_views(doc)
-                 if getattr(v, "Type", None) != 1]
-        if len(after) >= len(before):
-            return error("delete_failed",
-                         "EditDelete did not remove the view",
-                         "before=%s after=%s" % (before, after),
-                         before=before, after=after)
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(deleted=view_name, views_before=before, views_after=after,
-                          saved=bool(save))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
-        return error("delete_view_failed", str(exc))
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    after = [str(v.Name) for v in _iter_views(doc)
+             if getattr(v, "Type", None) != 1]
+    if len(after) >= len(before):
+        return error("delete_failed",
+                     "EditDelete did not remove the view",
+                     "before=%s after=%s" % (before, after),
+                     before=before, after=after)
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(deleted=view_name, views_before=before, views_after=after,
+                      saved=bool(save))
 
 
+@tool_guard("delete_annotation_failed")
 def delete_annotation(drawing_path, name, save=True, position_m=None):
     """Delete one annotation by name (broken hole callout, unwanted GT, stray note).
 
@@ -898,65 +871,61 @@ def delete_annotation(drawing_path, name, save=True, position_m=None):
     one sheet can hold eight annotations called "D1". Pass the `position_m` that
     `list_drawing_annotations` reported for the one you mean.
     """
+    from ..sw_session import error
+
+    doc = _open_drawing(drawing_path)
+    doc.ClearSelection2(True)
+    annotation, position = _find_annotation_by_name(doc, name, position_m)
+    if annotation is None:
+        return error("annotation_not_found",
+                     "no annotation named %r%s on this sheet"
+                     % (name, " at %r" % (position_m,) if position_m else ""),
+                     "list names first with list_drawing_annotations")
     try:
-        from ..sw_session import error
-
-        doc = _open_drawing(drawing_path)
-        doc.ClearSelection2(True)
-        annotation, position = _find_annotation_by_name(doc, name, position_m)
-        if annotation is None:
-            return error("annotation_not_found",
-                         "no annotation named %r%s on this sheet"
-                         % (name, " at %r" % (position_m,) if position_m else ""),
-                         "list names first with list_drawing_annotations")
-        try:
-            selected = annotation.Select(False)
-        except Exception as exc:
-            return error("select_failed", "IAnnotation.Select raised: %s" % str(exc)[:80])
-        try:
-            count = doc.SelectionManager.GetSelectedObjectCount2(-1)
-        except Exception:
-            count = None
-        if not selected or count == 0:
-            return error("select_failed",
-                         "Select(False) did not select %r" % name,
-                         "selected count=%r" % count)
-
-        before = _annotation_total(doc)
-        _call_method(doc, "EditDelete")
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        after = _annotation_total(doc)
-        doc.ClearSelection2(True)
-        removed = bool(before is not None and after is not None and after < before)
-        if not removed and position is not None:
-            # Fallback: a view can hand back a cached annotation list, leaving the total
-            # unchanged. Re-find the exact object instead of trusting the count.
-            again, again_position = _find_annotation_by_name(doc, name, position)
-            if again is None or again_position is None:
-                removed = True
-            else:
-                removed = not all(abs(again_position[i] - position[i]) <= 1e-3
-                                  for i in range(2))
-        if not removed and before is not None and after is not None:
-            return error("delete_failed",
-                         "EditDelete did not remove %r" % name,
-                         "annotation count %s -> %s (all views)" % (before, after))
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(deleted=name, removed=removed,
-                          annotations_before=before, annotations_after=after,
-                          counted_scope="all_views",
-                          position_m=[round(v, 4) for v in position] if position else None,
-                          saved=bool(save))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
+        selected = annotation.Select(False)
     except Exception as exc:
-        return error("delete_annotation_failed", str(exc))
+        return error("select_failed", "IAnnotation.Select raised: %s" % str(exc)[:80])
+    try:
+        count = doc.SelectionManager.GetSelectedObjectCount2(-1)
+    except Exception:
+        count = None
+    if not selected or count == 0:
+        return error("select_failed",
+                     "Select(False) did not select %r" % name,
+                     "selected count=%r" % count)
+
+    before = _annotation_total(doc)
+    _call_method(doc, "EditDelete")
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    after = _annotation_total(doc)
+    doc.ClearSelection2(True)
+    removed = bool(before is not None and after is not None and after < before)
+    if not removed and position is not None:
+        # Fallback: a view can hand back a cached annotation list, leaving the total
+        # unchanged. Re-find the exact object instead of trusting the count.
+        again, again_position = _find_annotation_by_name(doc, name, position)
+        if again is None or again_position is None:
+            removed = True
+        else:
+            removed = not all(abs(again_position[i] - position[i]) <= 1e-3
+                              for i in range(2))
+    if not removed and before is not None and after is not None:
+        return error("delete_failed",
+                     "EditDelete did not remove %r" % name,
+                     "annotation count %s -> %s (all views)" % (before, after))
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(deleted=name, removed=removed,
+                      annotations_before=before, annotations_after=after,
+                      counted_scope="all_views",
+                      position_m=[round(v, 4) for v in position] if position else None,
+                      saved=bool(save))
 
 
+@tool_guard("move_annotation_failed")
 def move_annotation(drawing_path, name, x_m, y_m, save=True, position_m=None):
     """Move an annotation or dimension to a sheet position (metres).
 
@@ -968,45 +937,41 @@ def move_annotation(drawing_path, name, x_m, y_m, save=True, position_m=None):
     note: `move_annotation` returned the new position, which a v0.8.14 report said was
     impossible.
     """
+    from ..sw_session import byref_dispatch_null, error
+
+    doc = _open_drawing(drawing_path)
+    doc.ClearSelection2(True)
+    annotation, before = _find_annotation_by_name(doc, name, position_m)
+    if annotation is None:
+        return error("annotation_not_found",
+                     "no annotation named %r on this sheet" % name,
+                     "list names first with list_drawing_annotations")
     try:
-        from ..sw_session import byref_dispatch_null, error
-
-        doc = _open_drawing(drawing_path)
-        doc.ClearSelection2(True)
-        annotation, before = _find_annotation_by_name(doc, name, position_m)
-        if annotation is None:
-            return error("annotation_not_found",
-                         "no annotation named %r on this sheet" % name,
-                         "list names first with list_drawing_annotations")
-        try:
-            before = [round(float(v), 4) for v in annotation.GetPosition]
-        except Exception:
-            before = None
-        try:
-            annotation.SetPosition(float(x_m), float(y_m), 0)
-        except Exception as exc:
-            return error("move_failed", "SetPosition raised: %s" % str(exc)[:80],
-                         "section/detail views keep projection alignment and refuse some moves")
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        after = None
-        try:
-            after = [round(float(v), 4) for v in annotation.GetPosition]
-        except Exception:
-            pass
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(moved=name, position_before_m=before, position_after_m=after,
-                          requested=[round(float(x_m), 4), round(float(y_m), 4)],
-                          applied=after != before, saved=bool(save))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
+        before = [round(float(v), 4) for v in annotation.GetPosition]
+    except Exception:
+        before = None
+    try:
+        annotation.SetPosition(float(x_m), float(y_m), 0)
     except Exception as exc:
-        return error("move_annotation_failed", str(exc))
+        return error("move_failed", "SetPosition raised: %s" % str(exc)[:80],
+                     "section/detail views keep projection alignment and refuse some moves")
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    after = None
+    try:
+        after = [round(float(v), 4) for v in annotation.GetPosition]
+    except Exception:
+        pass
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(moved=name, position_before_m=before, position_after_m=after,
+                      requested=[round(float(x_m), 4), round(float(y_m), 4)],
+                      applied=after != before, saved=bool(save))
 
 
+@tool_guard("set_dimension_position_failed")
 def set_dimension_position(drawing_path, name, x_m, y_m, save=True, position_m=None):
     """Move ONE dimension to a sheet position (metres), by its reported name.
 
@@ -1021,60 +986,55 @@ def set_dimension_position(drawing_path, name, x_m, y_m, save=True, position_m=N
     `list_drawing_annotations` reported. Without it the first match wins, which is exactly
     the wrong-dimension trap this tool otherwise exists to avoid.
     """
-    try:
-        import win32com.client as win
+    import win32com.client as win
 
-        doc = _open_drawing(drawing_path)
-        doc.ClearSelection2(True)
-        annotation, matched = _find_annotation_by_name(doc, name, position_m)
-        if annotation is None:
-            return error("annotation_not_found",
-                         "no annotation named %r%s on this sheet"
-                         % (name, " at %r" % (position_m,) if position_m else ""),
-                         "List names first with list_drawing_annotations; a repeated name "
-                         "needs position_m to tell the copies apart.")
-        try:
-            kind = int(annotation.GetType)
-        except Exception:
-            kind = None
-        if kind != 4:
-            return error("not_a_dimension",
-                         "%r is annotation type %r, not a dimension (4)" % (name, kind),
-                         "Use move_annotation for notes / GTOL / surface-finish symbols.")
-        value_mm = None
-        try:
-            specific = win.Dispatch(annotation.GetSpecificAnnotation)
-            dim = win.Dispatch(specific.GetDimension2(0))
-            value_mm = round(float(dim.SystemValue) * 1000.0, 3)
-        except Exception:
-            pass
-        try:
-            before = [round(float(v), 4) for v in annotation.GetPosition]
-        except Exception:
-            before = None
-        try:
-            annotation.SetPosition(float(x_m), float(y_m), 0)
-        except Exception as exc:
-            return error("move_failed", "SetPosition raised: %s" % str(exc)[:80],
-                         "Section/detail views keep projection alignment and refuse some moves.")
-        try:
-            _call_method(doc, "EditRebuild3")
-        except Exception:
-            pass
-        try:
-            after = [round(float(v), 4) for v in annotation.GetPosition]
-        except Exception:
-            after = None
-        if save:
-            _save_drawing(doc)
-        return drawing_ok(
-            dimension=name, dimension_value_mm=value_mm,
-            position_before_m=before, position_after_m=after,
-            requested=[round(float(x_m), 4), round(float(y_m), 4)],
-            matched_position_m=([round(v, 4) for v in matched] if matched else None),
-            disambiguated_by_position=bool(position_m),
-            applied=after != before, saved=bool(save))
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
+    doc = _open_drawing(drawing_path)
+    doc.ClearSelection2(True)
+    annotation, matched = _find_annotation_by_name(doc, name, position_m)
+    if annotation is None:
+        return error("annotation_not_found",
+                     "no annotation named %r%s on this sheet"
+                     % (name, " at %r" % (position_m,) if position_m else ""),
+                     "List names first with list_drawing_annotations; a repeated name "
+                     "needs position_m to tell the copies apart.")
+    try:
+        kind = int(annotation.GetType)
+    except Exception:
+        kind = None
+    if kind != 4:
+        return error("not_a_dimension",
+                     "%r is annotation type %r, not a dimension (4)" % (name, kind),
+                     "Use move_annotation for notes / GTOL / surface-finish symbols.")
+    value_mm = None
+    try:
+        specific = win.Dispatch(annotation.GetSpecificAnnotation)
+        dim = win.Dispatch(specific.GetDimension2(0))
+        value_mm = round(float(dim.SystemValue) * 1000.0, 3)
+    except Exception:
+        pass
+    try:
+        before = [round(float(v), 4) for v in annotation.GetPosition]
+    except Exception:
+        before = None
+    try:
+        annotation.SetPosition(float(x_m), float(y_m), 0)
     except Exception as exc:
-        return error("set_dimension_position_failed", str(exc))
+        return error("move_failed", "SetPosition raised: %s" % str(exc)[:80],
+                     "Section/detail views keep projection alignment and refuse some moves.")
+    try:
+        _call_method(doc, "EditRebuild3")
+    except Exception:
+        pass
+    try:
+        after = [round(float(v), 4) for v in annotation.GetPosition]
+    except Exception:
+        after = None
+    if save:
+        _save_drawing(doc)
+    return drawing_ok(
+        dimension=name, dimension_value_mm=value_mm,
+        position_before_m=before, position_after_m=after,
+        requested=[round(float(x_m), 4), round(float(y_m), 4)],
+        matched_position_m=([round(v, 4) for v in matched] if matched else None),
+        disambiguated_by_position=bool(position_m),
+        applied=after != before, saved=bool(save))

@@ -8,6 +8,7 @@ Ported from the validated sw_recolor.py CLI. The three critical rules:
 from __future__ import annotations
 
 from ..sw_session import (
+    tool_guard,
     SW_DOC_ASSEMBLY,
     double_array,
     error,
@@ -49,121 +50,114 @@ def describe_parts(components):
     return [groups[name] for name in sorted(groups)]
 
 
+@tool_guard("recolor_failed")
 def recolor_assembly(assembly_path, palette, apply=False, save=True):
     """Dry-run by default. With apply=True, paints and returns previous colors for undo."""
-    try:
-        palette = normalize_palette(palette)
-        doc = open_document(assembly_path, SW_DOC_ASSEMBLY)
-        components = get_components(doc)
-        if not components:
-            return error("empty_assembly", "No components found in %s" % doc.GetTitle)
+    palette = normalize_palette(palette)
+    doc = open_document(assembly_path, SW_DOC_ASSEMBLY)
+    components = get_components(doc)
+    if not components:
+        return error("empty_assembly", "No components found in %s" % doc.GetTitle)
 
-        parts = describe_parts(components)
-        present = {p["part"] for p in parts}
-        missing = sorted(set(palette) - present)
-        matched = [c for c in components if part_name(c.Name2) in palette]
-        base = {
-            "assembly": doc.GetTitle,
-            "path": doc.GetPathName,
-            "components": len(components),
-            "parts": parts,
-            "matched_components": len(matched),
-            "palette_keys_not_found": missing,
-            "applied": False,
-        }
-        if not matched:
-            available = sorted(present)
-            # dry-run is read-only: keep it exploratory so the caller can fix the keys
-            # from `parts` instead of paying an extra get_assembly_tree round trip.
-            if not apply:
-                base["dry_run"] = True
-                base["matched_components"] = 0
-                base["available_parts"] = available
-                base["message"] = (
-                    "No palette key matches this assembly; nothing would change. "
-                    "Use `parts` / available_parts to correct the names, then call again."
-                )
-                return ok(**base)
-            return error(
-                "no_match",
-                "No component matches palette keys: %s" % ", ".join(sorted(palette)),
-                "Run a dry-run first and use part names without the '-N' instance suffix.",
-                available_parts=available,
-            )
+    parts = describe_parts(components)
+    present = {p["part"] for p in parts}
+    missing = sorted(set(palette) - present)
+    matched = [c for c in components if part_name(c.Name2) in palette]
+    base = {
+        "assembly": doc.GetTitle,
+        "path": doc.GetPathName,
+        "components": len(components),
+        "parts": parts,
+        "matched_components": len(matched),
+        "palette_keys_not_found": missing,
+        "applied": False,
+    }
+    if not matched:
+        available = sorted(present)
+        # dry-run is read-only: keep it exploratory so the caller can fix the keys
+        # from `parts` instead of paying an extra get_assembly_tree round trip.
         if not apply:
             base["dry_run"] = True
-            base["message"] = "Nothing changed. Call again with apply=true to paint."
+            base["matched_components"] = 0
+            base["available_parts"] = available
+            base["message"] = (
+                "No palette key matches this assembly; nothing would change. "
+                "Use `parts` / available_parts to correct the names, then call again."
+            )
             return ok(**base)
-
-        previous = {}
-        painted = 0
-        for comp in matched:
-            name = comp.Name2
-            if name not in previous:
-                previous[name] = comp.MaterialPropertyValues
-            comp.MaterialPropertyValues = _color_array(palette[part_name(name)])
-            painted += 1
-
-        try:
-            doc.ForceRebuild3(False)
-        except Exception:
-            doc.EditRebuild3
-        if painted and save:
-            # pywin32 exposes SaveSilent as a property: bare access performs the
-            # save and returns 0/1. Calling it raises "'int' object is not callable".
-            doc.SaveSilent
-
-        # Read-back check, one instance per palette key (up to 8). On some bindings
-        # (SolidWorks 2026 with a gen_py cache) the getter returns white or None even
-        # though the render and the saved file are correct — never trust it blindly.
-        sample_components, seen_keys = [], set()
-        for comp in matched:
-            name = part_name(comp.Name2)
-            if name in seen_keys:
-                continue
-            seen_keys.add(name)
-            sample_components.append(comp)
-            if len(sample_components) >= 8:
-                break
-        readback = []
-        for comp in sample_components:
-            name = part_name(comp.Name2)
-            expected = palette[name]
-            actual = rgb_of(comp.MaterialPropertyValues)
-            matched_ok = bool(actual) and all(
-                abs(a - b) <= 0.02 for a, b in zip(actual[:3], expected[:3])
-            )
-            readback.append({
-                "component": comp.Name2,
-                "requested": expected,
-                "readback": actual,
-                "matches": matched_ok,
-            })
-        readback_ok = bool(readback) and all(item["matches"] for item in readback)
-
-        base.update({
-            "applied": True,
-            "painted_components": painted,
-            "saved": bool(painted and save),
-            "previous_colors": {
-                name: rgb_of(values) for name, values in previous.items()
-            },
-            "readback_sample": readback,
-            "readback_verified": readback_ok,
-        })
-        if not readback_ok:
-            base["warning"] = (
-                "MaterialPropertyValues does not read back the color just written, although "
-                "the model renders and saves correctly (known on some bindings: the getter "
-                "returns white [1,1,1] or null). Treat get_assembly_tree rgb and "
-                "previous_colors as unreliable here; verify visually with export_preview "
-                "instead of restoring colors from previous_colors."
-            )
-        return ok(**base)
-    except (FileNotFoundError, ValueError) as exc:
-        return error("bad_input", str(exc))
-    except Exception as exc:
         return error(
-            "recolor_failed", str(exc),
-            "See docs/com-quirks.md sections 1 and 4 for common COM failures.",
+            "no_match",
+            "No component matches palette keys: %s" % ", ".join(sorted(palette)),
+            "Run a dry-run first and use part names without the '-N' instance suffix.",
+            available_parts=available,
         )
+    if not apply:
+        base["dry_run"] = True
+        base["message"] = "Nothing changed. Call again with apply=true to paint."
+        return ok(**base)
+
+    previous = {}
+    painted = 0
+    for comp in matched:
+        name = comp.Name2
+        if name not in previous:
+            previous[name] = comp.MaterialPropertyValues
+        comp.MaterialPropertyValues = _color_array(palette[part_name(name)])
+        painted += 1
+
+    try:
+        doc.ForceRebuild3(False)
+    except Exception:
+        doc.EditRebuild3
+    if painted and save:
+        # pywin32 exposes SaveSilent as a property: bare access performs the
+        # save and returns 0/1. Calling it raises "'int' object is not callable".
+        doc.SaveSilent
+
+    # Read-back check, one instance per palette key (up to 8). On some bindings
+    # (SolidWorks 2026 with a gen_py cache) the getter returns white or None even
+    # though the render and the saved file are correct — never trust it blindly.
+    sample_components, seen_keys = [], set()
+    for comp in matched:
+        name = part_name(comp.Name2)
+        if name in seen_keys:
+            continue
+        seen_keys.add(name)
+        sample_components.append(comp)
+        if len(sample_components) >= 8:
+            break
+    readback = []
+    for comp in sample_components:
+        name = part_name(comp.Name2)
+        expected = palette[name]
+        actual = rgb_of(comp.MaterialPropertyValues)
+        matched_ok = bool(actual) and all(
+            abs(a - b) <= 0.02 for a, b in zip(actual[:3], expected[:3])
+        )
+        readback.append({
+            "component": comp.Name2,
+            "requested": expected,
+            "readback": actual,
+            "matches": matched_ok,
+        })
+    readback_ok = bool(readback) and all(item["matches"] for item in readback)
+
+    base.update({
+        "applied": True,
+        "painted_components": painted,
+        "saved": bool(painted and save),
+        "previous_colors": {
+            name: rgb_of(values) for name, values in previous.items()
+        },
+        "readback_sample": readback,
+        "readback_verified": readback_ok,
+    })
+    if not readback_ok:
+        base["warning"] = (
+            "MaterialPropertyValues does not read back the color just written, although "
+            "the model renders and saves correctly (known on some bindings: the getter "
+            "returns white [1,1,1] or null). Treat get_assembly_tree rgb and "
+            "previous_colors as unreliable here; verify visually with export_preview "
+            "instead of restoring colors from previous_colors."
+        )
+    return ok(**base)

@@ -122,6 +122,38 @@ def check(path=SERVER):
     return tools, problems
 
 
+def _star_import_names(path, tree):
+    """Names pulled in by `from .X import *` relative star imports.
+
+    drawing/ became a package whose feature modules do `from ._core import *`;
+    without expanding the star, every shared helper reads as an unbound name.
+    Resolves the sibling file and merges its module-level names (recursively,
+    so a star chain still terminates).
+    """
+    names = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not any(a.name == "*" for a in node.names):
+            continue
+        if not node.level or not node.module:
+            continue
+        base = os.path.dirname(path)
+        for _ in range(node.level - 1):
+            base = os.path.dirname(base)
+        target = os.path.join(base, node.module.replace(".", os.sep) + ".py")
+        if not os.path.exists(target):
+            continue
+        try:
+            sub_tree = ast.parse(open(target, encoding="utf-8").read(),
+                                 filename=target)
+        except (OSError, SyntaxError):
+            continue
+        sub_imports, sub_defined = _module_scope(sub_tree)
+        names |= sub_imports | sub_defined | _star_import_names(target, sub_tree)
+    return names
+
+
 def check_tools_module(path):
     """Undefined module/module-level names inside a tools/ module.
 
@@ -133,7 +165,7 @@ def check_tools_module(path):
     source = open(path, encoding="utf-8").read()
     tree = ast.parse(source, filename=path)
     imports, defined = _module_scope(tree)
-    module_scope = imports | defined
+    module_scope = imports | defined | _star_import_names(path, tree)
     problems = []
     for func in [n for n in ast.walk(tree)
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
@@ -364,7 +396,7 @@ def check_bare_names(path):
     imports, defined = _module_scope(tree)
     allow = set(dir(builtins)) | {"__name__", "__file__", "__doc__", "__class__",
                                   "__all__", "__package__", "__loader__", "__spec__"}
-    module_names = imports | defined | allow
+    module_names = imports | defined | allow | _star_import_names(path, tree)
     problems = []
     for func in tree.body:
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -391,8 +423,15 @@ def main():
         return 1
     tools, problems = check()
     for name in sorted(os.listdir(TOOLS_DIR)) if os.path.isdir(TOOLS_DIR) else []:
+        candidates = []
+        full = os.path.join(TOOLS_DIR, name)
         if name.endswith(".py"):
-            module_path = os.path.join(TOOLS_DIR, name)
+            candidates.append(full)
+        elif os.path.isdir(full) and not name.startswith("__"):
+            candidates.extend(
+                os.path.join(full, sub) for sub in sorted(os.listdir(full))
+                if sub.endswith(".py"))
+        for module_path in candidates:
             problems.extend(check_tools_module(module_path))
             problems.extend(check_property_traps(module_path, PROPERTY_TRAPS))
             problems.extend(check_duplicate_defs(module_path))
