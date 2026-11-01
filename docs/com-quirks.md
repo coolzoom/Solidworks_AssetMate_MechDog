@@ -1274,3 +1274,51 @@ add_drawing_dimension(view_name="工程图视图2", edge_index=0)
 1. **先把视图摆到位**（`place_views` / `set_view`），最后一步才 `add_section_view`
 2. 已经移过 → `delete_view` 删剖面重建（代价：该视图上的尺寸会丢）
 3. 每次改完 `export_drawing` + `render_drawing` 目视核对线是否压在父视图上
+
+## 二十七、切割线画错位置：一个表达式里两个错（0.8.32）
+
+`add_section_view` 原来这样算半长：
+
+```python
+half = (max(width, height) * 0.62) / scale     # width 来自 GetOutline
+sm.CreateLine(offset, -half, 0.0, offset, half, 0.0)
+```
+
+两处都错：
+
+### ① `width` 已经是图纸米，不该再除 scale
+
+`GetOutline` 返回的是**图纸坐标**，`width = outline[2] - outline[0]` 因此已经是图纸米。
+除 scale 后：`0.1669 × 0.62 / 0.1 = 1.0347 m` —— **A3 只有 420 mm**，线长 2 米多。
+
+这个 1.0347 就是 `GetLineInfo` 报出的 ± 值，之前误判成"模型坐标"，
+其实是**自己画进去的错误长度**。
+
+### ② `CreateLine` 用绝对坐标，没加视图位置
+
+草图在**图纸层**，坐标是图纸绝对坐标。写成 `(offset, ±half)` 就是 `x = 0`
+（图纸左边缘），只有线中段恰好扫过视图，看起来像"线在视图附近但错位"。
+
+### 修法
+
+```python
+precise_box = precise_outline(target) or outline
+half = max(precise_box[2] - precise_box[0], precise_box[3] - precise_box[1]) * 0.62
+...
+sm.CreateLine(pos[0] + offset, pos[1] - half, 0.0,
+              pos[0] + offset, pos[1] + half, 0.0)      # 竖剖
+```
+
+用 `precise_outline` 而不是 `GetOutline`，顺带把 11.9 mm 虚胖排除掉（否则线再长 24 mm）。
+
+实测（履带轮，A3，视图 scale 0.1）：
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| 半长 `half` | 1.0347 m | 0.1035 m |
+| 线 x | 0（图纸边缘） | 0.3133（= 视图中心） |
+| 线 y | -1.03 ~ +1.03（图纸外） | 0.1832 ~ 0.3754（视图 0.2596~0.299，上下各伸出 ~80 mm） |
+| `sanity` | — | `ratio 1.0, verdict ok` |
+
+**「移动父视图后跟随」仍不支持**：`SetLineInfo` 会把多段独立短线重排成一条折返线
+（实测两段被连成往返），所以只能保证**初始位置正确**，移动后仍需重建。

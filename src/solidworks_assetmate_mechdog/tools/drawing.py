@@ -2964,7 +2964,14 @@ def add_section_view(drawing_path, view_name=None, orientation="horizontal",
             }
         doc.ActivateView(target.Name)
 
-        half = (max(width, height) * 0.62) / scale
+        # `width`/`height` come from GetOutline and are ALREADY sheet metres — dividing by
+        # scale again produced a 1035 mm line on a 420 mm sheet (measured 2026-11-01:
+        # 0.1669 * 0.62 / 0.1 = 1.0347, which is exactly the ±1.0347 that GetLineInfo
+        # reported). Use the deflated outline so the 11.9 mm phantom margin does not
+        # stretch the line either.
+        precise_box = precise_outline(target) or outline
+        half = max(precise_box[2] - precise_box[0],
+                   precise_box[3] - precise_box[1]) * 0.62
         offset = float(offset_m) / scale
         # A top view's sketch y axis runs at -Z, so a model-space offset applied to the
         # horizontal cut line lands mirrored. Measured on 灌装阀阀体: offset -0.012 produced
@@ -2976,10 +2983,16 @@ def add_section_view(drawing_path, view_name=None, orientation="horizontal",
         sm = doc.SketchManager
         sm.InsertSketch(True)
         try:
+            # The sketch lives on the SHEET, so the line needs the view's own position added.
+            # Without `pos` it was drawn at x = 0 (the sheet edge) and only its middle
+            # happened to cross the view — that is the "cut line is nowhere near the view"
+            # the report saw.
             if str(orientation).lower() == "vertical":
-                sm.CreateLine(offset, -half, 0.0, offset, half, 0.0)
+                sm.CreateLine(pos[0] + offset, pos[1] - half, 0.0,
+                              pos[0] + offset, pos[1] + half, 0.0)
             else:
-                sm.CreateLine(-half, offset, 0.0, half, offset, 0.0)
+                sm.CreateLine(pos[0] - half, pos[1] + offset, 0.0,
+                              pos[0] + half, pos[1] + offset, 0.0)
         except Exception as exc:
             try:
                 sm.InsertSketch(True)

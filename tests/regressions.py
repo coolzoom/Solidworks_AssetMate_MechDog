@@ -1573,6 +1573,26 @@ def assert_section_line_limitation_declared():
     return "unsupported, four interfaces named, actionable workaround"
 
 
+def assert_cut_line_placed_on_its_view():
+    """0.8.32 — the cut line was 1035 mm long on a 420 mm sheet and drawn at x = 0.
+
+    Two bugs in one expression: `width`/`height` come from GetOutline and are ALREADY sheet
+    metres, so dividing by scale again gave half = 0.1669 * 0.62 / 0.1 = 1.0347 (that is
+    exactly the ±1.0347 GetLineInfo reported); and CreateLine used absolute coordinates
+    without the view's position, so the line sat at the sheet edge instead of on the view.
+    """
+    src = _read("tools/drawing.py")
+    body = ast.get_source_segment(src, _function_node(ast.parse(src),
+                                                      "add_section_view")) or ""
+    assert "/ scale\n" not in body.split("half =")[1].split("\n")[0], (
+        "half is divided by scale again — width/height are already sheet metres")
+    assert "precise_outline(target)" in body, (
+        "half does not use the deflated outline, so the 11.9 mm margin stretches the line")
+    assert "pos[0] + offset" in body or "pos[0] - half" in body, (
+        "CreateLine does not add the view position — the line lands at x = 0")
+    return "half in sheet metres from precise outline, line anchored to the view"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -1638,6 +1658,7 @@ STATIC_REGRESSIONS = [
     ("0.8.29 break alignment", assert_set_view_break_alignment),
     ("0.8.30 duplicate dim unsupported", assert_duplicate_dimension_declared_unsupported),
     ("0.8.31 section line unsupported", assert_section_line_limitation_declared),
+    ("0.8.32 cut line on view", assert_cut_line_placed_on_its_view),
 ]
 
 

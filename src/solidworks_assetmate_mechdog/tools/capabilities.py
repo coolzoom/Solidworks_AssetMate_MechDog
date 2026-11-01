@@ -196,7 +196,7 @@ CAPABILITIES = [
     {
         "id": "section_line_follows_view",
         "status": "unsupported",
-        "summary": "移动父视图时让剖面切割线跟着走",
+        "summary": "移动父视图时让剖面切割线跟着走（0.8.32 已修正初始位置，跟随仍不支持）",
         "why": ("**API 层面无解**（2026-11-01 实测四组接口）。剖切线只有三种触达方式，都不对："
                 "① `IDrSection.GetLineInfo` 返回**模型坐标**（±1.03 m，远超 A3 的 420 mm，"
                 "不是图纸坐标），移动视图后数值不变；"
@@ -205,9 +205,12 @@ CAPABILITIES = [
                 "③ `IView.GetSectionLineInfo2` 只读且同样是模型坐标；"
                 "④ `IView.GetSketchCount` / `GetSketches` 在晚绑定下**不存在**，"
                 "无法触达图纸上的那条线。"
-                "另外渲染核对发现更基本的问题：`add_section_view` 建出来的切割线"
-                "**在图纸上的位置与父视图并不重合**（父视图在左上，线在图纸中部），"
-                "所以「移动后脱离」之前就已经偏了。"),
+                "**0.8.32 已修正初始位置**：原来 `half` 多除了一次 `scale`"
+                "（`width` 取自 `GetOutline` 本就是图纸米，0.1669×0.62/0.1 = 1.0347 m，"
+                "A3 只有 420 mm），且 `CreateLine` 用绝对坐标没加视图位置，线画在了 x=0。"
+                "修好后线长 0.1035 m、x = 视图中心，实测 `GetLineInfo` 的 x 与视图一致、"
+                "y 覆盖视图上下各约 80 mm。**但「跟随」仍做不到**：`SetLineInfo` 会把"
+                "多段线重排成折返（实测把两段独立短线连成一条往返线）。"),
         "workaround": ("**先把视图摆到位，再建剖面**（`add_section_view` 是最后一步）。"
                        "已经移过就 `delete_view` 删掉剖面再重建——代价是该视图上的尺寸会丢，"
                        "所以务必先定死布局。每次改动后用 `export_drawing` + `render_drawing` "
