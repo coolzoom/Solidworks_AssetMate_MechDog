@@ -351,6 +351,42 @@ CAPABILITIES = [
         "evidence": "设计决策",
     },
     {
+        "id": "document_session",
+        "status": "pilot",
+        "summary": "文档会话：list/open/activate/close/save/import/rebuild/macro",
+        "why": ("0.9.0 新增（借鉴 HarrierPigeon/haunchen 的文档管理工具）。"
+                "`open_document`/`activate_document`/`close_document`/`list_documents` "
+                "补上了批量处理必须的会话层（SolidWorks ~40 文档上限）；"
+                "`import_file` 走 `LoadFile4` 接 STEP/IGES/x_t/SAT/STL；"
+                "`run_macro` 是类型化工具的兜底逃生口（apply 才执行）。"
+                "均按惯例 dry-run/结构化错误实现，真机验证待 smoke"),
+        "workaround": "文档打不开先看 list_documents 是否堆积；中性文件用 import_file 不用 open",
+        "evidence": "2026-11-01 实现；smoke 覆盖 list/open/activate/close/save/import/rebuild/macro",
+    },
+    {
+        "id": "model_ops",
+        "status": "pilot",
+        "summary": "装配操作：配合/干涉/配置/组件状态 + 自定义属性 + 多视图截图",
+        "why": ("0.9.0 新增（借鉴 HarrierPigeon list_mates/check_interference/配置工具 与 "
+                "yimu0824 自定义属性）。`list_mates` 走 MateGroup 子特征枚举 IMate2；"
+                "`check_interference` 用 InterferenceDetectionManager（先解析轻化件，"
+                "用完 Done）；`set_component_state` 用 SetSuppression2 + GetSuppression 回读；"
+                "自定义属性走 CustomPropertyManager，写后回读验证、链接属性拒写报 "
+                "prop_not_applied。真机验证待 smoke"),
+        "workaround": "属性写不进先看是否 SW-* 链接属性；干涉为 0 先确认没有轻化组件",
+        "evidence": "2026-11-01 实现；API 签名取自官方文档与同类项目实测记录",
+    },
+    {
+        "id": "measure_entities",
+        "status": "pilot",
+        "summary": "实体测距（IMeasure：距离/角度/面积/直径）",
+        "why": ("0.9.0 新增，v0.9 几何测距项的地基。`Extension.CreateMeasure` + `Calculate` "
+                "依赖**实体先被选中**——SelectByID2 按名选仅对命名实体有效，按点选要求点"
+                "精确落在实体上；选不上返回结构化 select_failed 而非假数据"),
+        "workaround": "点坐标用 build_feature_ledger 的孔中心 / list_drawing_edges 的模型坐标",
+        "evidence": "2026-11-01 实现；选择路径的不可靠性来自 SelectByID2 本身（quirks 第三节）",
+    },
+    {
         "id": "geometry_creation",
         "status": "unsupported",
         "summary": "建模/特征创建",

@@ -71,7 +71,7 @@ A3 最多 3 视图、批量读图必须逐张关闭、`material_library` 解析�
 | **v0.6** | 形位公差可创建 / 一站式出图流水线 `produce_drawing` | ✅ 已发布（0.6.1） |
 | **v0.7** | 排版能力（视图摆位/尺寸删减/注记/件号/图纸直线）+ 钣金 QC + 展开依据声明 | ✅ 已发布（0.7.0） |
 | **v0.8** | **BOM 明细栏可用**（10 行 4 列含数量列）+ 第四道静态防线 | ✅ 已发布（0.8.0–0.8.33） |
-| v0.9 | 几何测距（最小折弯边/孔到折弯线）、尺寸精准筛选、图面利用率、形位公差符号 | 🔜 下一个 |
+| v0.9 | 文档会话/属性/配合/干涉/配置/测距（竞品借鉴，0.9.0）+ 几何测距落地、尺寸精准筛选、图面利用率、形位公差符号 | � 部分已发布 |
 | v1.0 | 接口冻结、多配置与显示状态、升级说明 | 远期 |
 
 ### v0.5 / v0.6 已完成
@@ -121,6 +121,27 @@ A3 最多 3 视图、批量读图必须逐张关闭、`material_library` 解析�
 | ~~v0.8.14 反馈遗留五条~~ | ✅ 0.8.24：**P1-2** `list_circular_edges` 改用 `ICurve.CircleParams`（顶点路在轮廓边上恒为空，实测 0 → 23 条），`add_hole_callouts` 增 `verdict`（`no_native_callout` + 说明：边与相邻面都能选中仍返回 null，属几何限制）；**P2-4** 新增 `prune_orphan_dimensions`（按 name+position 删，实测 4 → 1，删后重跑校验）；**P3-1** `layout_dimensions` 把视图标签 note 当固定障碍（顺带修 `int(GetType())` 必抛导致类型过滤从未生效）；**P3-2** `add_note` 增 `avoid_collisions`；**P3-4** `set_title_block` 回执带单元格名与坐标；回归断言 39 → 45、工具 55 → 56 |
 | ~~v0.8.14 反馈（标注删除 / 自检可信度）~~ | ✅ 0.8.23：**P0** `delete_annotation` 成功判定改为跨**全部视图**计数（删尺寸不改变图纸视图计数，旧的只看 `GetFirstView` 会把成功报成 `delete_failed`），四类标注实测可删、`position_m` 可区分 19 个同名 `D1`；**P1-1** 直径判定改用 `dimension_type == 5`（`GetText()` 无槽号对尺寸返回空，Ø 计数曾恒为 0），`list_drawing_annotations` 补 `dimension_type` / `raw_text` / 解析后 `text`；**P1-3** `pypdfium2` / `Pillow` 升为硬依赖且提示点名解释器；**P2-5** `model_clean` 由 blocker 降为 pending；**P3-5** reconcile 剔除 0.0 草图约束值；回归断言 34 → 39 |
 
+### v0.9 已交付（0.9.0，2026-11-01，竞品借鉴）
+
+系统分析了 GitHub 上 8 个 SolidWorks MCP 项目（HarrierPigeon、jaylamping、
+haunchen、andrewbartels1、danielproxd2、eyfel/SolidPilot、yimu0824、yezg9920-kely），
+按本仓库非目标（不做参数化建模）筛出 20 个契合能力合入：
+
+- **单 STA 线程收编**（haunchen / yezg9920）：全部工具体经
+  `sw_session.run_on_com_thread` 在 `sw-com` 线程执行，消除 FastMCP 线程池
+  跨 COM 单元调用同一 dispatcher 的 `Not connected` 类故障。
+- **文档会话**（HarrierPigeon / haunchen / yimu0824）：`list_documents` /
+  `open_document` / `activate_document` / `close_document` / `save_document` /
+  `import_file`（LoadFile4 接中性格式）/ `rebuild_document` / `run_macro`。
+- **自定义属性**（yimu0824 / HarrierPigeon）：get/set/delete，写后回读验证。
+- **装配操作**（HarrierPigeon / haunchen）：`list_mates` / `check_interference` /
+  `list_configurations` / `activate_configuration` / `set_component_state` /
+  `capture_model_views`。
+- **轻量特征树**（haunchen）：`list_features`。
+- **实体测距**（jaylamping）：`measure_entities`（IMeasure）——几何测距项地基。
+- **批量调用**（HarrierPigeon `batch`）：`run_batch` 一次请求跑多个工具。
+- **路径沙箱**（jaylamping `ALLOWED_ROOTS`）：`ASSETMATE_ALLOWED_ROOTS` 环境变量。
+
 ### v0.9 待做
 
 | 条目 | 为什么 | 难度 |
@@ -136,9 +157,9 @@ A3 最多 3 视图、批量读图必须逐张关闭、`material_library` 解析�
 
 ## 5. 必须先补的工程能力
 
-1. **批量处理框架**：读图必须逐张 `CloseDoc`（40+ 文档后全失败）；需要统一的批量入口，含进度与失败重试。
+1. **批量处理框架**：读图必须逐张 `CloseDoc`（40+ 文档后全失败）；~~需要统一的批量入口~~（0.9.0 `run_batch` + `list_documents`/`close_document` 已补齐会话层），含进度与失败重试仍待做。
 2. **超时与长任务**：单工具默认超时 300 s，批量走后台任务 + 状态轮询。
-3. **COM 会话健壮性**：SW 崩溃/关闭后自动重连；文档堆积时主动清理。
+3. **COM 会话健壮性**：SW 崩溃/关闭后自动重连；文档堆积时主动清理。~~跨线程派发~~（0.9.0 单 STA 线程收编）。
 4. **可观测性**：每个工具返回 `elapsed_ms`、`doc`、`warnings`；错误统一 `{ok:false, error, message, hint}`。
 5. **无 COM 单测**：调色板校验、零件名归一化、JSON 结构、错误分支、统计分位数；真机回归单独跑。
 6. **真机回归夹具**：监视器固定支架（46 组件）+ 配电箱（钣金）+ 100 张真实图纸抽样。

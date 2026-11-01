@@ -345,6 +345,9 @@ SMOKE_MODULE_MAP = {
     "planner": "solidworks_assetmate_mechdog.tools.planner",
     "rename": "solidworks_assetmate_mechdog.tools.rename",
     "material": "solidworks_assetmate_mechdog.tools.material",
+    "documents": "solidworks_assetmate_mechdog.tools.documents",
+    "properties": "solidworks_assetmate_mechdog.tools.properties",
+    "measure": "solidworks_assetmate_mechdog.tools.measure",
     "sw_session": "solidworks_assetmate_mechdog.sw_session",
 }
 
@@ -1930,6 +1933,53 @@ def assert_orphans_near_view_not_excused():
     return "proximity reported, never used to clear a blocker"
 
 
+def assert_tool_bodies_marshal_to_com_thread():
+    """0.9.0 — every tool body runs on the single STA thread, not a random worker.
+
+    FastMCP dispatches sync tools onto arbitrary anyio threads; a dispatcher created in
+    one apartment and called from another intermittently fails with RPC_E_WRONG_THREAD,
+    the same family as the P0-1 bridge outage. server.py therefore wraps every
+    `return _json(...)` in a lambda that _json dispatches via
+    sw_session.run_on_com_thread. A bare `return _json(module.func(` means the call
+    happens BEFORE the marshalling — which silently bypasses the whole fix.
+    """
+    src = _read("server.py")
+    tree = ast.parse(src)
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if not (isinstance(call.func, ast.Name) and call.func.id == "_json"):
+            continue
+        if not call.args:
+            bad.append((node.lineno, "_json() with no argument"))
+            continue
+        arg = call.args[0]
+        if not isinstance(arg, ast.Lambda):
+            bad.append((node.lineno, "bare _json(payload) — call happens off the COM thread"))
+    assert not bad, "off-thread tool bodies: %s" % bad[:5]
+    session_src = _read("sw_session.py")
+    assert "def run_on_com_thread" in session_src, "marshaller missing"
+    assert "CoInitialize" in session_src, "worker never initialises the STA"
+    return "every _json call site wraps a lambda; worker initialises STA"
+
+
+def assert_run_batch_refuses_itself():
+    """0.9.0 — run_batch must not be able to call itself or main.
+
+    A batch that can nest run_batch can queue work inside its own result loop; the
+    refuse-list keeps the recursion and the entry point out of the dispatch table.
+    """
+    src = _read("server.py")
+    body = ast.get_source_segment(
+        src, _function_node(ast.parse(src), "run_batch")) or ""
+    assert body, "run_batch not found in server.py"
+    assert '"run_batch"' in body and '"main"' in body, (
+        "the dispatch guard no longer refuses self-recursion / main")
+    return "self-recursion and entry point excluded from dispatch"
+
+
 STATIC_REGRESSIONS = [
     ("0.8.3 row/text ordering", assert_row_before_text),
     ("0.8.4 bom wrapper signature", assert_bom_wrapper_signature),
@@ -2014,6 +2064,8 @@ STATIC_REGRESSIONS = [
     ("0.8.38 static check bare names", assert_static_check_covers_bare_names),
     ("0.8.39 circle annotatability", assert_circular_edges_predict_annotatability),
     ("0.8.41 orphans near view", assert_orphans_near_view_not_excused),
+    ("0.9.0 com thread marshalling", assert_tool_bodies_marshal_to_com_thread),
+    ("0.9.0 batch no self recursion", assert_run_batch_refuses_itself),
 ]
 
 

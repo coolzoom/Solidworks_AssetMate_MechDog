@@ -355,6 +355,48 @@ def build_feature_ledger(model_path, include_faces=True, config=None):
         return error("ledger_failed", str(exc))
 
 
+def list_features(model_path, include_folders=False):
+    """Flat feature-tree listing: name, type, suppression state. Read-only.
+
+    The light counterpart of build_feature_ledger — no dimensions, no face
+    scans, just the design-tree order so a caller can answer "what is in this
+    model" and target features for list_mates / set_component_state style
+    follow-ups without paying for the full ledger walk.
+    """
+    try:
+        model = open_document(model_path)
+        rows = []
+        feature = model.FirstFeature
+        guard = 0
+        while feature is not None and guard < 2000:
+            guard += 1
+            try:
+                ftype = feature.GetTypeName2
+            except Exception:
+                ftype = None
+            if ftype in FOLDER_TYPES and not include_folders:
+                feature = feature.GetNextFeature
+                continue
+            row = {"index": len(rows), "name": None, "type": ftype,
+                   "suppressed": None}
+            try:
+                row["name"] = str(feature.Name)
+            except Exception:
+                pass
+            try:
+                row["suppressed"] = bool(feature.IsSuppressed)
+            except Exception:
+                pass
+            rows.append(row)
+            feature = feature.GetNextFeature
+        return ok(document=str(model.GetTitle), path=str(model.GetPathName),
+                  count=len(rows), features=rows)
+    except (FileNotFoundError, ValueError, PermissionError) as exc:
+        return error("bad_input", str(exc))
+    except Exception as exc:
+        return error("features_failed", str(exc))
+
+
 def _material_of(model):
     """Material name, or None when the part has none assigned (never invented)."""
     try:

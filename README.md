@@ -121,6 +121,31 @@ Windows + SolidWorks 2020+，纯 Python + COM，不需要编译 C# 插件。MCP 
 | `health_check` | **桥接与 SolidWorks 是否都活着**（可分辨"桥死了"与"SW 不响应"） |
 | `recent_failures` | **读回当日失败日志**（工具名/参数/错误/SW 版本/健康快照） |
 
+### 四、文档与模型操作（20）
+
+| 工具 | 作用 |
+|---|---|
+| `list_documents` | 列当前已加载的所有文档（标题/路径/类型/未保存标记），防 ~40 文档上限 |
+| `open_document` | 显式打开原生文档；中性格式被拒并指向 `import_file` |
+| `activate_document` | 把已打开文档提到前台（标题/路径/基名，歧义名拒绝） |
+| `close_document` | 按名关文档，或 `all_docs` 全关；未保存改动如实报告 |
+| `save_document` | 原位保存 / 另存 / 中性格式导出（目标存在需 `overwrite`） |
+| `rebuild_document` | 重建模型并重读 `NeedsRebuild2`，区分真改动与图纸脏标记 |
+| `import_file` | 导入 STEP / IGES / Parasolid / ACIS / STL 为零件（`LoadFile4`） |
+| `run_macro` | 跑 .swp/.swb 宏（`apply=True` 才执行），覆盖类型化工具的盲区 |
+| `get_custom_properties` | 读文档/配置的自定义属性（存储表达式 + 解析值），供标题栏/BOM 审计 |
+| `set_custom_property` | 写自定义属性（dry-run 默认，写后回读验证） |
+| `delete_custom_property` | 删自定义属性（dry-run 默认） |
+| `list_mates` | 装配配合清单：类型 + 配对组件；可按实例名过滤（装配 IR 数据源） |
+| `check_interference` | 干涉检查：碰撞组件对 + 体积（先解析轻化件） |
+| `list_configurations` | 配置清单 + 当前激活配置 |
+| `activate_configuration` | 切换配置（dry-run 默认，切后回读激活名） |
+| `set_component_state` | 组件状态：resolved / lightweight / suppressed / hidden / shown（dry-run 默认 + 回读） |
+| `capture_model_views` | 多视图截图批量导出（等轴/前/上/右或任意命名视图） |
+| `list_features` | 轻量特征树：名称/类型/抑制态，不付台账的面扫描成本 |
+| `measure_entities` | 实体测距：1–2 个实体的距离/角度/面积/直径（v0.9 几何测距的地基） |
+| `run_batch` | 一次请求跑多个工具 `[{tool, args}]`，结果与逐调一致 |
+
 ---
 
 ## 工程图闭环
@@ -371,7 +396,7 @@ python tests/smoke.py
 ```
 
 **第一项是静态检查**（`tests/static_check.py`，0.0 s，不需要 SolidWorks）：扫描 `server.py`
-里 56 个工具函数，确认每个 `name.attribute` 的 `name` 都有 import 或定义、每个 wrapper
+里全部工具函数，确认每个 `name.attribute` 的 `name` 都有 import 或定义、每个 wrapper
 转发的参数都在签名里。0.4.6 那种"调用即崩"的 `NameError` 会在这里被挡住，而不是等 COM 跑完。
 
 ```bash
@@ -424,7 +449,7 @@ python tests/smoke.py --skip-export --skip-drawing --eng-cases --eng-sample 1
 
 1. **工具返回成功 ≠ 图纸正确** — 每步回读（孔标注读孔径、尺寸读公差类型、剖视读实际切到的位置）
 2. **接口报错 ≠ API 不存在** — 见下方专节，这条差点让形位公差被判死刑
-3. **统一会话层** — 所有工具共用 `sw_session`，慢调用只取一次
+3. **统一会话层** — 所有工具共用 `sw_session`，慢调用只取一次；全部工具体经 `run_on_com_thread` 收编到**单一 STA 线程**（借鉴 haunchen/yezg9920 的单线程 COM 模式），杜绝跨单元调用同一 dispatcher 的 `Not connected` 类故障；环境变量 `ASSETMATE_ALLOWED_ROOTS`（借鉴 jaylamping）可做路径沙箱、`ASSETMATE_COM_INLINE=1` 回退行内执行
 4. **写操作先快照** — 默认 dry-run，返回修改前的值
 5. **不编造结果** — COM 不可用时返回结构化错误 + 坑文档编号，绝不假装成功
 6. **判定要有依据** — 阈值由 100 张真实图纸实测，不是凭感觉
@@ -460,7 +485,7 @@ python tests/smoke.py --skip-export --skip-drawing --eng-cases --eng-sample 1
 - ~~v0.6 形位公差 / `produce_drawing` 流水线~~ ✅（0.6.1）
 - ~~v0.7 排版能力 / 钣金 QC / 展开依据~~ ✅
 - ~~v0.8 BOM 明细栏 / 第四道静态防线 / 边枚举提速~~ ✅（0.8.2）
-- **v0.9 待做**：几何测距（折弯边/孔到折弯线）、尺寸精准筛选、图面利用率、`GetPolylines7`
+- **v0.9 进行中**：文档会话 / 自定义属性 / 配合 / 干涉 / 配置 / 组件状态 / 实体测距 / 批量调用 ✅（0.9.0，借鉴 GitHub 同类 MCP）；余下：几何测距落地折弯边/孔到折弯线、尺寸精准筛选、图面利用率、`GetPolylines7`
 
 ---
 

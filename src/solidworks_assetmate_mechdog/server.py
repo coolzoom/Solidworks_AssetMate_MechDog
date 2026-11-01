@@ -10,9 +10,10 @@ from mcp.server.fastmcp import FastMCP
 
 from . import SERVER_NAME, __version__
 from . import sw_session
-from .tools import (assembly, bodies, bom, capabilities, drawing, export as export_tools,
-                    layout, ledger, material as material_tools, pipeline, planner, recolor,
-                    rename, sheet_metal, survey)
+from .tools import (assembly, bodies, bom, capabilities, documents, drawing,
+                    export as export_tools, layout, ledger,
+                    material as material_tools, measure, pipeline, planner,
+                    properties, recolor, rename, sheet_metal, survey)
 
 mcp = FastMCP(SERVER_NAME)
 # FastMCP (mcp 1.x) has no `version` argument: the low-level server falls back to
@@ -25,26 +26,39 @@ if getattr(mcp, "_mcp_server", None) is not None:
 def _json(payload):
     """Serialise a tool result, and log it when it reports failure.
 
-    Hooking here instead of in 51 individual wrappers keeps the coverage complete without
-    touching every tool: every result passes through this one function. The tool name is
-    taken from the caller's frame, which is the `@mcp.tool()` function itself.
+    Callers pass `lambda: module.func(...)`; the lambda runs on the single STA
+    thread in sw_session so every COM object is created and consumed in one
+    apartment (see sw_session.run_on_com_thread for why a per-call worker
+    thread was not safe). A plain dict payload is also accepted and serialised
+    on that same thread so the failure log's health snapshot stays consistent.
+
+    The tool name is taken from the caller's frame, which is the `@mcp.tool()`
+    function itself.
     """
     import sys
 
+    # Capture the caller on THIS side of the dispatch: inside job() the stack is the
+    # COM worker's (_com_worker → job → threading.run), so a frame probe there can
+    # never see the tool name.
     tool = None
     try:
         tool = sys._getframe(1).f_code.co_name
     except Exception:
         pass
-    try:
-        if isinstance(payload, dict):
-            sw_session.note_last_call(tool=tool, args=None)
-            if payload.get("ok") is False:
-                sw_session.log_failure(tool, payload)
-    except Exception:
-        # Diagnostics must never break a tool.
-        pass
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def job():
+        data = payload() if callable(payload) else payload
+        try:
+            if isinstance(data, dict):
+                sw_session.note_last_call(tool=tool, args=None)
+                if data.get("ok") is False:
+                    sw_session.log_failure(tool, data)
+        except Exception:
+            # Diagnostics must never break a tool.
+            pass
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
+    return sw_session.run_on_com_thread(job)
 
 
 def _install_excepthook():
@@ -92,7 +106,7 @@ def health_check(deep: bool = False) -> str:
     pointer — `reconnect()` retries), SolidWorks is not responding, or everything is fine.
     `deep=True` also reads ActiveDoc, which is where a stale pointer usually surfaces.
     """
-    return json.dumps(sw_session.health(deep=deep), ensure_ascii=False, indent=2)
+    return _json(lambda: sw_session.health(deep=deep))
 
 
 @mcp.tool()
@@ -104,7 +118,7 @@ def ping() -> str:
     the self-healing counters (`bridge.stale_drops` / `bridge.reconnects`). Use it to tell
     "alive but busy" from "dead"; use health(deep=True) when you also need ActiveDoc.
     """
-    return _json(sw_session.ping())
+    return _json(lambda: sw_session.ping())
 
 
 @mcp.tool()
@@ -154,7 +168,7 @@ def produce_drawing(
     prune_to_plan=True makes the plan binding: dimensions the plan did not keep are deleted
     right after insertion. Set False for the old "import everything" behaviour.
     """
-    return _json(pipeline.produce_drawing(
+    return _json(lambda: pipeline.produce_drawing(
         model_path, output_path=output_path, paper=paper,
         views=tuple(views) if views else None, category=category,
         do_hole_callouts=do_hole_callouts, do_surface_finish=do_surface_finish,
@@ -174,7 +188,7 @@ def plan_drawing(
     every driving dimension puts ~44 on the sheet, which is transcription, not drafting.
     `keep_dimensions` is the shortlist to feed auto_dimension.
     """
-    return _json(planner.plan_drawing(
+    return _json(lambda: planner.plan_drawing(
         model_path, paper=paper,
         views=tuple(views) if views else ("front", "right"),
         include_unmarked=include_unmarked))
@@ -187,7 +201,7 @@ def check_capabilities(operation: str | None = None) -> str:
     Each entry states the limit, the evidence behind it, and the workaround. Use it to
     avoid a 400-second run that ends in "0 hole callouts".
     """
-    return _json(capabilities.check_capabilities(operation=operation))
+    return _json(lambda: capabilities.check_capabilities(operation=operation))
 
 
 @mcp.tool()
@@ -207,7 +221,7 @@ def recolor_assembly(
     Returns previous colors for undo; readback covers at most 8 part types
     (1 instance per palette key) and flags when the getter is unreliable.
     """
-    return _json(recolor.recolor_assembly(assembly_path, palette, apply=apply, save=save))
+    return _json(lambda: recolor.recolor_assembly(assembly_path, palette, apply=apply, save=save))
 
 
 @mcp.tool()
@@ -216,7 +230,7 @@ def list_bodies(part_path: str) -> str:
 
     Use body names as palette keys — the returned order can change between calls.
     """
-    return _json(bodies.list_bodies(part_path))
+    return _json(lambda: bodies.list_bodies(part_path))
 
 
 @mcp.tool()
@@ -233,7 +247,7 @@ def recolor_bodies(
     anything. Each paint is applied only after verifying exactly one body is
     selected (guards against a document-wide recolor).
     """
-    return _json(bodies.recolor_bodies(part_path, palette, apply=apply, save=save))
+    return _json(lambda: bodies.recolor_bodies(part_path, palette, apply=apply, save=save))
 
 
 @mcp.tool()
@@ -251,7 +265,7 @@ def export_bom(
     skips that, at the cost of null mass/material). Missing values are reported in
     `warnings`, never guessed. Optionally writes a UTF-8 CSV for Excel.
     """
-    return _json(bom.export_bom(
+    return _json(lambda: bom.export_bom(
         assembly_path, include_mass=include_mass, include_material=include_material,
         csv_path=csv_path, refresh=refresh, resolve_lightweight=resolve_lightweight,
     ))
@@ -275,7 +289,7 @@ def rename_components(
                  Requires assembly_path. Instance names follow the new file name.
     mode="instance" is unsupported: SolidWorks has no writable instance-name API.
     """
-    return _json(rename.rename_components(
+    return _json(lambda: rename.rename_components(
         part_paths=part_paths, mapping=mapping, prefix=prefix, suffix=suffix,
         apply=apply, assembly_path=assembly_path, mode=mode, save=save,
     ))
@@ -295,7 +309,7 @@ def batch_export(
     overwritten. PDF needs a .SLDDRW and DXF a flat pattern — those are rejected
     with a hint rather than guessed at.
     """
-    return _json(export_tools.batch_export(targets, output_dir, fmt=fmt, apply=apply))
+    return _json(lambda: export_tools.batch_export(targets, output_dir, fmt=fmt, apply=apply))
 
 
 @mcp.tool()
@@ -317,7 +331,7 @@ def set_view(
     view can leave the strip beside its parent. It clears THIS view's alignment only; views
     that inherit from it stay as they are.
     """
-    return _json(layout.set_view(drawing_path, view_name, x_m=x_m, y_m=y_m,
+    return _json(lambda: layout.set_view(drawing_path, view_name, x_m=x_m, y_m=y_m,
                                  scale=scale, save=save,
                                  break_alignment=break_alignment))
 
@@ -325,7 +339,7 @@ def set_view(
 @mcp.tool()
 def place_views(drawing_path: str, placements: list, save: bool = True) -> str:
     """Place several views at once: [{view, x, y, scale}] in sheet metres."""
-    return _json(layout.place_views(drawing_path, placements, save=save))
+    return _json(lambda: layout.place_views(drawing_path, placements, save=save))
 
 
 @mcp.tool()
@@ -341,7 +355,7 @@ def delete_dimensions(
     SolidWorks has no bulk delete; each dimension is selected by position and removed with
     EditDelete. Measured 2026-10-29: 14 dimensions in ONE call took < 5 s.
     """
-    return _json(layout.delete_dimensions(drawing_path, keep_values=keep_values,
+    return _json(lambda: layout.delete_dimensions(drawing_path, keep_values=keep_values,
                                           view_name=view_name,
                                           keep_tolerance_mm=keep_tolerance_mm, save=save))
 
@@ -358,7 +372,7 @@ def add_note(
     first line is not overprinted by a section arrow. The receipt reports
     `position_requested_m` vs `position_m` plus `collisions_avoided`.
     """
-    return _json(layout.add_note(drawing_path, text, x_m, y_m,
+    return _json(lambda: layout.add_note(drawing_path, text, x_m, y_m,
                                  height_mm=height_mm, bold=bold, save=save,
                                  avoid_collisions=avoid_collisions))
 
@@ -378,7 +392,7 @@ def layout_dimensions(
     than `min_gap_m` upward. Already-clear dimensions are not touched.
     Use dry_run=True first to see how many collisions it would fix.
     """
-    return _json(drawing.layout_dimensions(drawing_path, view_name=view_name,
+    return _json(lambda: drawing.layout_dimensions(drawing_path, view_name=view_name,
                                            min_gap_m=min_gap_m,
                                            cluster_tol_m=cluster_tol_m,
                                            dry_run=dry_run, save=save))
@@ -391,7 +405,7 @@ def delete_view(drawing_path: str, view_name: str, save: bool = True) -> str:
     Create-only APIs meant one wrong `add_section_view` forced rebuilding the whole sheet.
     `view_name` comes from `drawing_audit` or `view_positions`.
     """
-    return _json(layout.delete_view(drawing_path, view_name, save=save))
+    return _json(lambda: layout.delete_view(drawing_path, view_name, save=save))
 
 
 @mcp.tool()
@@ -406,7 +420,7 @@ def delete_annotation(drawing_path: str, name: str, save: bool = True,
     `position_m` disambiguates repeated names — SolidWorks reuses D1/D2/D3 per sketch, so
     one sheet can hold eight annotations called "D1"; pass the position the listing reported.
     """
-    return _json(layout.delete_annotation(drawing_path, name, save=save,
+    return _json(lambda: layout.delete_annotation(drawing_path, name, save=save,
                                           position_m=position_m))
 
 
@@ -420,7 +434,7 @@ def move_annotation(drawing_path: str, name: str, x_m: float, y_m: float,
 
     `position_m` disambiguates repeated names (see delete_annotation).
     """
-    return _json(layout.move_annotation(drawing_path, name, x_m, y_m, save=save,
+    return _json(lambda: layout.move_annotation(drawing_path, name, x_m, y_m, save=save,
                                         position_m=position_m))
 
 
@@ -438,7 +452,7 @@ def set_dimension_position(drawing_path: str, name: str, x_m: float, y_m: float,
     real). The implementation always supported it; the wrapper not forwarding it is what
     made "move exactly one D1" impossible from the MCP side.
     """
-    return _json(layout.set_dimension_position(drawing_path, name, x_m, y_m,
+    return _json(lambda: layout.set_dimension_position(drawing_path, name, x_m, y_m,
                                              save=save, position_m=position_m))
 
 
@@ -460,7 +474,7 @@ def add_bom_table(
     guarded by `static_check.check_wrapper_signatures` (a regression assertion, not a
     runtime concern — see CONTRIBUTING).
     """
-    return _json(layout.add_bom_table(drawing_path, view_name=view_name,
+    return _json(lambda: layout.add_bom_table(drawing_path, view_name=view_name,
                                       configuration=configuration,
                                       template=template, save=save))
 
@@ -474,7 +488,7 @@ def add_sheet_line(
     Drawing sketches take sheet metres, not millimetres: passing 236/62 produced a scaled
     fan of diagonals instead of a horizontal line.
     """
-    return _json(layout.add_sheet_line(drawing_path, x1_m, y1_m, x2_m, y2_m, save=save))
+    return _json(lambda: layout.add_sheet_line(drawing_path, x1_m, y1_m, x2_m, y2_m, save=save))
 
 
 @mcp.tool()
@@ -488,7 +502,7 @@ def sheet_metal_qc(model_path: str, include_cylinders: bool = False) -> str:
     include_cylinders=True adds a cylinder radius inventory (every hole and bend fillet,
     grouped by radius). Costs about 90 extra seconds on a 556-face part, hence opt-in.
     """
-    return _json(sheet_metal.sheet_metal_qc(model_path, include_cylinders=include_cylinders))
+    return _json(lambda: sheet_metal.sheet_metal_qc(model_path, include_cylinders=include_cylinders))
 
 
 @mcp.tool()
@@ -499,7 +513,7 @@ def flat_pattern_report(model_path: str) -> str:
     flattened state into a view; it does not read the K-factor or bend table, does not
     verify the blank, and must not have process parameters invented on the drawing.
     """
-    return _json(sheet_metal.flat_pattern_report(model_path))
+    return _json(lambda: sheet_metal.flat_pattern_report(model_path))
 
 
 @mcp.tool()
@@ -528,7 +542,7 @@ def add_geometric_tolerance(
     a failed write returns gtol_symbol_not_applied instead of a frame with no symbol.
     Pass view_name + edge_index to attach the leader to geometry.
     """
-    return _json(drawing.add_geometric_tolerance(
+    return _json(lambda: drawing.add_geometric_tolerance(
         drawing_path, x, y, tolerance=tolerance, datum=datum, symbol=symbol,
         view_name=view_name, edge_index=edge_index, second_datum=second_datum,
         third_datum=third_datum, save=save))
@@ -563,7 +577,7 @@ def add_surface_finish(
     (`visibility.visible`); verify_dwg=True additionally checks a DWG export is non-empty
     (DWG is vector data, so visibility itself is proven through the PDF).
     """
-    return _json(drawing.add_surface_finish(
+    return _json(lambda: drawing.add_surface_finish(
         drawing_path, x, y, roughness=roughness, sym_type=sym_type,
         leader_type=leader_type, lay_symbol=lay_symbol, arrow_type=arrow_type,
         prod_method=prod_method, sample_len=sample_len,
@@ -578,7 +592,7 @@ def verify_dimension_attachments(drawing_path: str, view_name: str | None = None
 
     Dimensions with no attachment are untraceable and count as incomplete (process §6.1).
     """
-    return _json(drawing.verify_dimension_attachments(drawing_path, view_name=view_name))
+    return _json(lambda: drawing.verify_dimension_attachments(drawing_path, view_name=view_name))
 
 
 @mcp.tool()
@@ -601,7 +615,7 @@ def prune_orphan_dimensions(
     as orphan while still leading to real geometry (a report found the 50 mm overall length
     in that list).
     """
-    return _json(drawing.prune_orphan_dimensions(drawing_path, view_name=view_name,
+    return _json(lambda: drawing.prune_orphan_dimensions(drawing_path, view_name=view_name,
                                                  dry_run=dry_run, save=save,
                                                  confirm=confirm))
 
@@ -613,7 +627,7 @@ def list_circular_edges(
     min_diameter_mm: float = 0.0,
 ) -> str:
     """List circular edges of a view: sheet position + diameter. Use before callouts."""
-    return _json(drawing.list_circular_edges(
+    return _json(lambda: drawing.list_circular_edges(
         drawing_path, view_name=view_name, min_diameter_mm=min_diameter_mm))
 
 
@@ -634,7 +648,7 @@ def add_hole_callouts(
     has ~9 circular edges). Callouts are stacked to the right of the view by default; pass
     leader_x_m / leader_y_m (sheet metres) to pin the text inside the frame (P1-7).
     """
-    return _json(drawing.add_hole_callouts(
+    return _json(lambda: drawing.add_hole_callouts(
         drawing_path, view_name=view_name, min_diameter_mm=min_diameter_mm,
         max_callouts=max_callouts, budget_s=budget_s,
         leader_x_m=leader_x_m, leader_y_m=leader_y_m, save=save))
@@ -652,7 +666,7 @@ def reconcile_ledger(
     grouped by feature, and drawing-only values. Projection means the same edge dimensions
     differently per view, so treat the unmatched list as candidates to confirm.
     """
-    return _json(drawing.reconcile_ledger(
+    return _json(lambda: drawing.reconcile_ledger(
         model_path, drawing_path, tolerance_mm=tolerance_mm))
 
 
@@ -672,7 +686,7 @@ def survey_drawings(
     Each drawing is closed right after it is read: SolidWorks refuses to open anything once
     ~40 documents are loaded, and one drawing takes 4-11 s, so sampling beats full scans.
     """
-    return _json(survey.survey_drawings(
+    return _json(lambda: survey.survey_drawings(
         folder, sample_size=sample_size, seed=seed, html_path=html_path,
     ))
 
@@ -691,7 +705,7 @@ def delivery_check(
     ai_supplied lists values the caller supplied (material, tolerance, fit) — anything
     listed downgrades the verdict to 待设计审核.
     """
-    return _json(drawing.delivery_check(
+    return _json(lambda: drawing.delivery_check(
         model_path, drawing_path, ai_supplied=ai_supplied, require_gdt=require_gdt,
         strict_attachments=strict_attachments,
     ))
@@ -705,7 +719,7 @@ def list_drawing_annotations(drawing_path: str, view_name: str | None = None) ->
     Use it to prove what a drawing does or does not carry — e.g. "no geometric
     tolerance anywhere" — which the CAD API cannot create but can read.
     """
-    return _json(drawing.list_drawing_annotations(drawing_path, view_name=view_name))
+    return _json(lambda: drawing.list_drawing_annotations(drawing_path, view_name=view_name))
 
 
 @mcp.tool()
@@ -723,7 +737,7 @@ def add_dimension_tolerance(
     tolerance_type: bilateral | symmetric | limit | basic | min | max | fit |
     fit_with_tolerance | none. upper/lower in millimetres. Dry-run by default.
     """
-    return _json(drawing.add_dimension_tolerance(
+    return _json(lambda: drawing.add_dimension_tolerance(
         drawing_path, value_mm, tolerance_type=tolerance_type, upper=upper,
         lower=lower, view_name=view_name, apply=apply,
     ))
@@ -732,7 +746,7 @@ def add_dimension_tolerance(
 @mcp.tool()
 def material_library(database: str = "SolidWorks Materials.sldmat") -> str:
     """List material names available in the installed SolidWorks material library."""
-    return _json(material_tools.material_library(database=database))
+    return _json(lambda: material_tools.material_library(database=database))
 
 
 @mcp.tool()
@@ -749,7 +763,7 @@ def set_part_material(
     Dry-run by default. Without a material SolidWorks uses 1000 kg/m³, so BOM masses are
     wrong until this is set.
     """
-    return _json(material_tools.set_part_material(
+    return _json(lambda: material_tools.set_part_material(
         paths, material_name, database=database, config=config, save=save, apply=apply,
     ))
 
@@ -768,7 +782,7 @@ def assign_materials(
     The chosen material is an AI-supplied value: it is reported per part with its reason
     and should be listed as pending confirmation in the delivery record.
     """
-    return _json(material_tools.assign_materials(
+    return _json(lambda: material_tools.assign_materials(
         paths, rules=rules, database=database, config=config, save=save, apply=apply,
     ))
 
@@ -785,7 +799,7 @@ def build_feature_ledger(
 
     include_faces=False skips cylindrical-face scanning (faster on large models).
     """
-    return _json(ledger.build_feature_ledger(
+    return _json(lambda: ledger.build_feature_ledger(
         model_path, include_faces=include_faces, config=config,
     ))
 
@@ -810,7 +824,7 @@ def create_drawing(
     view_positions: one sheet position per view, in metres, e.g.
     [[0.10, 0.20], [0.28, 0.20]] — same order as `views`. Omit to let auto_fit place them.
     """
-    return _json(drawing.create_drawing(
+    return _json(lambda: drawing.create_drawing(
         model_path, output_path=output_path, template=template,
         views=views or ["front", "top", "isometric"], scale=scale, auto_fit=auto_fit,
         view_scales=view_scales, paper=paper, view_positions=view_positions,
@@ -823,7 +837,7 @@ def export_drawing(drawing_path: str, output_path: str, fmt: str | None = None) 
 
     PDF can only come from a drawing — for STEP/STL of models use batch_export.
     """
-    return _json(drawing.export_drawing(drawing_path, output_path, fmt=fmt))
+    return _json(lambda: drawing.export_drawing(drawing_path, output_path, fmt=fmt))
 
 
 @mcp.tool()
@@ -832,7 +846,7 @@ def render_drawing(pdf_path: str, output_dir: str | None = None, scale: float = 
 
     Requires pypdfium2 (pip install pypdfium2). Returns one PNG per page.
     """
-    return _json(drawing.render_drawing(pdf_path, output_dir=output_dir, scale=scale))
+    return _json(lambda: drawing.render_drawing(pdf_path, output_dir=output_dir, scale=scale))
 
 
 @mcp.tool()
@@ -863,7 +877,7 @@ def add_section_view(
     and a section that does not keep the source view's width (or height, for vertical
     cuts) within 10% -> `section_suspicious`. Both keep the view on the sheet.
     """
-    return _json(drawing.add_section_view(
+    return _json(lambda: drawing.add_section_view(
         drawing_path, view_name=view_name, orientation=orientation,
         offset_m=offset_m, position=position, label=label, flip=flip, depth=depth,
         cut_plane_normal=cut_plane_normal, cut_plane_origin=cut_plane_origin,
@@ -895,7 +909,7 @@ def add_detail_view(
     visible edges, and error(detail_scale_locked) if SolidWorks refuses the requested
     scale — neither is reported as a silent ok:true anymore.
     """
-    return _json(drawing.add_detail_view(
+    return _json(lambda: drawing.add_detail_view(
         drawing_path, view_name=view_name, center=center, radius_m=radius_m,
         position=position, scale=scale, label=label, style=style, shape=shape,
         flip=flip, show_label=show_label, circle_segments=circle_segments,
@@ -917,7 +931,7 @@ def add_flat_pattern_view(
     The part must have a Flat-Pattern feature. Dimension sheet metal on the flat
     pattern, not the folded view.
     """
-    return _json(drawing.add_flat_pattern_view(
+    return _json(lambda: drawing.add_flat_pattern_view(
         drawing_path, model_path, config_name=config_name, position=position,
         scale=scale, hide_bend_lines=hide_bend_lines, flip=flip,
     ))
@@ -947,7 +961,7 @@ def auto_dimension(
     by side (gap + n × step). Use it instead of scaling the view up to hide overprinting:
     SolidWorks' own ~10 mm offset does not scale with the part.
     """
-    return _json(drawing.auto_dimension(
+    return _json(lambda: drawing.auto_dimension(
         drawing_path, all_views=all_views, include_unmarked=include_unmarked,
         eliminate_duplicates=eliminate_duplicates, dimension_filter=dimension_filter,
         place_outside=place_outside, outside_gap_m=outside_gap_m,
@@ -962,7 +976,7 @@ def list_drawing_edges(drawing_path: str, view_name: str | None = None) -> str:
     Use the index with add_drawing_dimension(edge_index=...) when sheet coordinates
     are inconvenient (drawing edges report MODEL coordinates under this binding).
     """
-    return _json(drawing.list_drawing_edges(drawing_path, view_name=view_name))
+    return _json(lambda: drawing.list_drawing_edges(drawing_path, view_name=view_name))
 
 
 @mcp.tool()
@@ -983,7 +997,7 @@ def add_drawing_dimension(
     already has, so IR-rebuilt parts need this. value is meters; omit to keep the
     computed value. Selection falls back EDGE -> SILHOUETTE -> SKETCHSEGMENT.
     """
-    return _json(drawing.add_drawing_dimension(
+    return _json(lambda: drawing.add_drawing_dimension(
         drawing_path, x, y, value=value, offset_x=offset_x, offset_y=offset_y,
         view_name=view_name, tolerance=tolerance, edge_index=edge_index,
     ))
@@ -1000,7 +1014,7 @@ def add_center_marks(
     Returns views_marked (reliable) rather than a mark count, which under-reports
     on this binding.
     """
-    return _json(drawing.add_center_marks(
+    return _json(lambda: drawing.add_center_marks(
         drawing_path, include_slots=include_slots, extended_lines=extended_lines,
     ))
 
@@ -1015,7 +1029,7 @@ def add_hole_callout(drawing_path: str, x: float, y: float,
     Returns callout_failed when the point is not on a hole's projected circle —
     a missing callout is reported, never faked.
     """
-    return _json(drawing.add_hole_callout(
+    return _json(lambda: drawing.add_hole_callout(
         drawing_path, x, y, view_name=view_name, model_path=model_path, save=save,
     ))
 
@@ -1038,7 +1052,7 @@ def set_title_block(
     model. Dry-run by default; only the fields you pass are changed, and fields
     that cannot be found are reported instead of invented.
     """
-    return _json(drawing.set_title_block(
+    return _json(lambda: drawing.set_title_block(
         drawing_path, name=name, code=code, material=material, apply=apply,
         include_reversed=include_reversed,
     ))
@@ -1051,7 +1065,7 @@ def drawing_audit(drawing_path: str) -> str:
     Evidence only — it never judges view choice, tolerances or manufacturability.
     Blank views and zero dimensions are reported as warnings, not silently passed.
     """
-    return _json(drawing.drawing_audit(drawing_path))
+    return _json(lambda: drawing.drawing_audit(drawing_path))
 
 
 @mcp.tool()
@@ -1062,7 +1076,7 @@ def get_assembly_tree(assembly_path: str, max_depth: int = 1, refresh: bool = Fa
     The component list is cached per document; set refresh=true after editing
     the assembly's structure outside this server.
     """
-    return _json(assembly.assembly_tree(assembly_path, max_depth=max_depth, refresh=refresh))
+    return _json(lambda: assembly.assembly_tree(assembly_path, max_depth=max_depth, refresh=refresh))
 
 
 @mcp.tool()
@@ -1072,7 +1086,7 @@ def get_mass_properties(assembly_path: str) -> str:
     Returns a structured error when CreateMassProperty is unavailable on the
     current binding (see docs/com-quirks.md section 5) instead of a guess.
     """
-    return _json(assembly.mass_properties(assembly_path))
+    return _json(lambda: assembly.mass_properties(assembly_path))
 
 
 @mcp.tool()
@@ -1088,9 +1102,267 @@ def export_preview(
     size is 'WxH'. SolidWorks writes BMP natively; PNG requires Pillow and the
     intermediate BMP is deleted unless keep_bmp=true.
     """
-    return _json(assembly.export_preview(
+    return _json(lambda: assembly.export_preview(
         assembly_path, output_path, size=size, view=view, keep_bmp=keep_bmp,
     ))
+
+
+@mcp.tool()
+def list_documents() -> str:
+    """List every document loaded in this SolidWorks session.
+
+    Title, path, type, unsaved-changes flag, read-only — plus which one is
+    active. SolidWorks refuses new opens once ~40 documents are loaded, so this
+    is the way to see batch-read buildup before it becomes open failures.
+    """
+    return _json(lambda: documents.list_documents())
+
+
+@mcp.tool()
+def open_document(path: str, activate: bool = True) -> str:
+    """Open a native .SLDPRT/.SLDASM/.SLDDRW explicitly and report what loaded.
+
+    Most tools open implicitly; use this when the workflow needs a document
+    staged before later calls, or to verify a file opens before batching over
+    it. Neutral formats (STEP/IGES/...) are refused with a hint to import_file.
+    """
+    return _json(lambda: documents.open_file(path, activate=activate))
+
+
+@mcp.tool()
+def activate_document(ref: str) -> str:
+    """Bring an already-open document to the front (ActiveDoc).
+
+    ref is a title ("Part1"), a full path, or a basename. Ambiguous names are
+    refused with the open-title list rather than activating an arbitrary match.
+    """
+    return _json(lambda: documents.activate_document(ref))
+
+
+@mcp.tool()
+def close_document(ref: str | None = None, save: bool = False,
+                   all_docs: bool = False) -> str:
+    """Close a document by title/path/basename, or everything with all_docs=True.
+
+    Batch readers must close each document after use — SolidWorks stops opening
+    files once roughly 40 are loaded. save=True persists first; otherwise an
+    unsaved-changes flag is reported so a discard is never silent.
+    """
+    return _json(lambda: documents.close_document(ref=ref, save=save,
+                                                  all_docs=all_docs))
+
+
+@mcp.tool()
+def save_document(path: str | None = None, new_path: str | None = None,
+                  overwrite: bool = False) -> str:
+    """Save the document in place, or save-as / export to new_path.
+
+    A neutral extension (.STEP/.IGES/.X_T/.SAT/.STL) on new_path exports and
+    leaves the document path unchanged; a native one does a real save-as.
+    Existing targets need overwrite=True — never clobbered silently.
+    """
+    return _json(lambda: documents.save_document(path=path, new_path=new_path,
+                                                 overwrite=overwrite))
+
+
+@mcp.tool()
+def rebuild_document(path: str | None = None, force: bool = False) -> str:
+    """Rebuild a model and re-read NeedsRebuild2.
+
+    force=True uses ForceRebuild3 (every feature); the default EditRebuild3 is
+    the incremental rebuild. The post-rebuild flag distinguishes a real model
+    change (still dirty) from a drawing-induced dirty flag (cleared).
+    """
+    return _json(lambda: documents.rebuild_document(path=path, force=force))
+
+
+@mcp.tool()
+def import_file(path: str, save_as: str | None = None) -> str:
+    """Import a neutral CAD file (STEP / IGES / Parasolid / ACIS / STL) as a part.
+
+    Goes through ISldWorks.LoadFile4 — OpenDoc6 only accepts native types.
+    Feature recognition is out of scope (that is parametric-modeling territory).
+    """
+    return _json(lambda: documents.import_file(path, save_as=save_as))
+
+
+@mcp.tool()
+def run_macro(macro_path: str, module: str = "", procedure: str = "",
+              apply: bool = False) -> str:
+    """Run a SolidWorks VBA macro (.swp/.swb). Dry-run validates the file only.
+
+    Escape hatch for operations the typed tools do not cover. The macro runs
+    with SolidWorks' full permissions, so apply=True is required.
+    """
+    return _json(lambda: documents.run_macro(macro_path, module=module,
+                                             procedure=procedure, apply=apply))
+
+
+@mcp.tool()
+def get_custom_properties(path: str, config: str | None = None) -> str:
+    """Read a document's custom properties (stored expression + resolved value).
+
+    "SW-Mass@..." stores a link and resolves to a number — the pair is what a
+    title-block/BOM audit needs. config names a configuration for
+    configuration-specific properties. Read-only.
+    """
+    return _json(lambda: properties.get_custom_properties(path, config=config))
+
+
+@mcp.tool()
+def set_custom_property(path: str, name: str, value: str,
+                        config: str | None = None, field_type: int = 30,
+                        apply: bool = False) -> str:
+    """Add or update a custom property. Dry-run reports the previous value.
+
+    field_type: 30 text / 3 date / 11 yes-no / 64 number. The write is verified
+    by read-back — a linked property that refuses the value returns
+    prop_not_applied instead of a fake success.
+    """
+    return _json(lambda: properties.set_custom_property(
+        path, name, value, config=config, field_type=field_type, apply=apply))
+
+
+@mcp.tool()
+def delete_custom_property(path: str, name: str, config: str | None = None,
+                           apply: bool = False) -> str:
+    """Delete a custom property by name. Dry-run confirms it exists first."""
+    return _json(lambda: properties.delete_custom_property(
+        path, name, config=config, apply=apply))
+
+
+@mcp.tool()
+def list_mates(assembly_path: str, component: str | None = None) -> str:
+    """List assembly mates: type (coincident/concentric/distance/...) + partners.
+
+    component="Plate-1" filters to mates involving that instance — the answer
+    to "how is this part held in place". Read-only.
+    """
+    return _json(lambda: assembly.list_mates(assembly_path, component=component))
+
+
+@mcp.tool()
+def check_interference(assembly_path: str) -> str:
+    """Detect overlapping component pairs (the UI's 干涉检查). Read-only.
+
+    Lightweight components are resolved first or the check sees nothing.
+    Returns pairs and, when the binding exposes it, the overlap volume.
+    """
+    return _json(lambda: assembly.check_interference(assembly_path))
+
+
+@mcp.tool()
+def list_configurations(model_path: str) -> str:
+    """List a document's configurations and which one is active. Read-only."""
+    return _json(lambda: assembly.list_configurations(model_path))
+
+
+@mcp.tool()
+def activate_configuration(model_path: str, config_name: str,
+                           apply: bool = False) -> str:
+    """Switch to a named configuration. Dry-run reports target + current.
+
+    apply=True runs ShowConfiguration2 and re-reads the active name, so a
+    refused switch reports config_not_activated rather than a silent no-op.
+    """
+    return _json(lambda: assembly.activate_configuration(
+        model_path, config_name, apply=apply))
+
+
+@mcp.tool()
+def set_component_state(assembly_path: str, component: str, state: str,
+                        apply: bool = False) -> str:
+    """Set a component's state: resolved | lightweight | suppressed | hidden | shown.
+
+    Dry-run lists matched instances and their current state. apply=True changes
+    them and reads back GetSuppression/Visible, so a refused state is reported.
+    """
+    return _json(lambda: assembly.set_component_state(
+        assembly_path, component, state, apply=apply))
+
+
+@mcp.tool()
+def capture_model_views(model_path: str, output_dir: str,
+                        views: list | None = None, size: str = "1200x900") -> str:
+    """Export one BMP per named view — export_preview's multi-view counterpart.
+
+    views defaults to isometric/front/top/right; native names ("*前视") work
+    too. Unrecognised views land in `failed`, they do not abort the batch.
+    """
+    return _json(lambda: assembly.capture_model_views(
+        model_path, output_dir, views=views, size=size))
+
+
+@mcp.tool()
+def list_features(model_path: str, include_folders: bool = False) -> str:
+    """Flat feature-tree list: name, type, suppression state. Read-only.
+
+    The light counterpart of build_feature_ledger — answers "what is in this
+    model" in design-tree order without paying for dimension and face scans.
+    """
+    return _json(lambda: ledger.list_features(model_path,
+                                              include_folders=include_folders))
+
+
+@mcp.tool()
+def measure_entities(path: str, entities: list) -> str:
+    """Measure distance/angle/area between 1-2 entities (model metres). Read-only.
+
+    Each entity: {"type":"FACE|EDGE|VERTEX|PLANE", "name":"Plane1"} or
+    {"type":"EDGE","point":[x,y,z]}. Two entities → distance, xyz deltas, angle;
+    one → perimeter/area/diameter. Inapplicable values are omitted, never
+    zero-filled. Feeds the geometric checks sheet_metal_qc marks not_checked.
+    """
+    return _json(lambda: measure.measure_entities(path, entities))
+
+
+@mcp.tool()
+def run_batch(calls: list, stop_on_error: bool = False) -> str:
+    """Run several of this server's tools in one request: [{tool, args}, ...].
+
+    Each call runs the same Python function its MCP wrapper does, so results
+    are identical to calling the tools one by one — minus the round trips. All
+    calls share the single COM thread already used by every tool. Unknown tool
+    names and argument mismatches are reported per call, not fatal; set
+    stop_on_error=True to abort the batch on the first ok:false result.
+    """
+    import sys as _sys
+
+    module = _sys.modules[__name__]
+    results = []
+    for index, call in enumerate(calls or []):
+        name = call.get("tool") if isinstance(call, dict) else None
+        args = call.get("args", {}) if isinstance(call, dict) else {}
+        entry = {"index": index, "tool": name}
+        fn = getattr(module, name, None) if isinstance(name, str) else None
+        if (not isinstance(name, str) or name.startswith("_")
+                or name in ("run_batch", "main") or not callable(fn)
+                or getattr(fn, "__module__", None) != __name__):
+            entry["result"] = {"ok": False, "error": "unknown_tool",
+                               "message": "no MCP tool named %r" % name}
+        elif not isinstance(args, dict):
+            entry["result"] = {"ok": False, "error": "bad_args",
+                               "message": "args must be an object"}
+        else:
+            try:
+                entry["result"] = json.loads(fn(**args))
+            except TypeError as exc:
+                entry["result"] = {"ok": False, "error": "bad_args",
+                                   "message": str(exc)[:200]}
+            except Exception as exc:
+                entry["result"] = {"ok": False, "error": "tool_raised",
+                                   "message": str(exc)[:200]}
+        results.append(entry)
+        if stop_on_error and not entry["result"].get("ok", False):
+            break
+    failed = [r["tool"] for r in results if not r["result"].get("ok", False)]
+    return _json(lambda: {
+        "ok": not failed,
+        "count": len(results),
+        "failed": failed or None,
+        "stopped_early": stop_on_error and bool(failed),
+        "results": results,
+    })
 
 
 def main():

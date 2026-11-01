@@ -262,6 +262,113 @@ def variant(value, vartype):
     return VARIANT(vartype, value)
 
 
+# ---------------------------------------------------------------------------
+# Dedicated COM thread
+#
+# FastMCP runs every sync tool on an arbitrary anyio worker thread, so without
+# marshalling each call lands on a different apartment. A dispatcher created on
+# thread A and invoked from thread B bypasses marshalling and intermittently
+# raises RPC_E_WRONG_THREAD / "Not connected" — the same outward symptom as the
+# bridge-lost outage P0-1 fixed at the pointer level. Marshalling every tool
+# body onto ONE STA thread (the pattern haunchen/solidworks-mcp and
+# yezg9920-kely/solidworks-mcp both use) removes the apartment variable
+# entirely: every COM object is created and consumed on the same thread.
+#
+# run_on_com_thread() runs the callable on that worker. Off-Windows or without
+# pywin32 it falls back to inline execution so imports and static tests still
+# work; ASSETMATE_COM_INLINE=1 forces the fallback (debug escape hatch).
+# ---------------------------------------------------------------------------
+
+import queue as _queue
+import threading as _threading
+
+_COM_THREAD = None
+_COM_TASKS = None
+
+
+def _com_worker(tasks):
+    """Single-threaded COM apartment: initialise STA, then serve the queue."""
+    try:
+        pythoncom, _, _ = _com()
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
+    while True:
+        item = tasks.get()
+        if item is None:
+            return
+        fn, answer = item
+        try:
+            answer.put((True, fn()))
+        except BaseException as exc:
+            answer.put((False, exc))
+
+
+def _com_thread():
+    global _COM_THREAD, _COM_TASKS
+    if _COM_TASKS is None:
+        _COM_TASKS = _queue.Queue()
+        _COM_THREAD = _threading.Thread(
+            target=_com_worker, args=(_COM_TASKS,), daemon=True, name="sw-com")
+        _COM_THREAD.start()
+    return _COM_THREAD
+
+
+def run_on_com_thread(fn):
+    """Run fn() on the single dedicated COM thread and return its result.
+
+    Re-entrant: a tool body already executing on the COM thread (e.g. run_batch
+    dispatching inner tools) runs inline instead of deadlocking on its own queue.
+    """
+    if os.environ.get("ASSETMATE_COM_INLINE"):
+        return fn()
+    if _COM_THREAD is not None and _threading.current_thread() is _COM_THREAD:
+        return fn()
+    thread = _com_thread()
+    answer = _queue.Queue()
+    _COM_TASKS.put((fn, answer))
+    succeeded, value = answer.get()
+    if succeeded:
+        return value
+    raise value
+
+
+# ---------------------------------------------------------------------------
+# Path sandbox (borrowed from jaylamping/solidworks-mcp's ALLOWED_ROOTS idea)
+#
+# ASSETMATE_ALLOWED_ROOTS is a ';' separated list of directories. When set,
+# open_document() refuses paths outside them — a path typo or a crafted request
+# cannot make the server read a file the operator did not intend to expose.
+# Unset (default) preserves the old unrestricted behaviour; the sandbox is an
+# opt-in hardening switch, echoed in ping() so the operator can prove it is on.
+# ---------------------------------------------------------------------------
+
+def allowed_roots():
+    raw = os.environ.get("ASSETMATE_ALLOWED_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots = []
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if chunk:
+            roots.append(os.path.normcase(os.path.abspath(chunk)))
+    return roots
+
+
+def check_path_allowed(path):
+    """Raise PermissionError when path escapes ASSETMATE_ALLOWED_ROOTS."""
+    roots = allowed_roots()
+    if not roots:
+        return os.path.abspath(path)
+    resolved = os.path.normcase(os.path.abspath(path))
+    for root in roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            return os.path.abspath(path)
+    raise PermissionError(
+        "path outside ASSETMATE_ALLOWED_ROOTS: %s (allowed: %s)"
+        % (path, "; ".join(roots)))
+
+
 def double_array(values):
     """VT_ARRAY | VT_R8 — a plain Python list silently fails for many SW APIs."""
     pythoncom, _, _ = _com()
@@ -457,6 +564,8 @@ def ping():
         "last_call": dict(_LAST_CALL) if isinstance(_LAST_CALL, dict) else None,
         "bridge": None,
         "probe_interval_s": LIVENESS_PROBE_INTERVAL_S,
+        "com_thread": _COM_THREAD.name if _COM_THREAD is not None else "inline",
+        "allowed_roots": allowed_roots() or None,
         "recovered": False,
         # Which copy is running — see runtime_info() for why the path matters.
         "runtime": runtime_info(),
@@ -530,7 +639,7 @@ def open_document(path, doc_type=None):
     "file may be locked" message, when the real cause was `OpenDoc6` returning None for a
     type mismatch (reported 2026-10-28).
     """
-    path = os.path.abspath(path)
+    path = check_path_allowed(path)
     if not os.path.exists(path):
         # FileNotFoundError(path) stringifies to a bare path; keep the reason.
         raise FileNotFoundError(

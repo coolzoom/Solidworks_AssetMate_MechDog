@@ -1104,6 +1104,123 @@ def main():
     r.check("material write honesty (0.8.6)", _material_write_honesty)
     r.check("reconcile ledger + delivery verdict", _reconcile_delivery)
     r.check("server wrapper contract", _server_wrapper_contract)
+
+    # ---- document lifecycle & model-ops tools (added for the v0.9 session domain) ----
+    from solidworks_assetmate_mechdog.tools import documents, measure, properties
+
+    def _document_lifecycle():
+        listed = require(documents.list_documents())
+        assert listed["count"] >= 1, listed
+        opened = require(documents.open_file(part_copy))
+        assert opened.get("title"), opened
+        # The MCP tool is named open_document; the low-level reuse path it
+        # shares with every other tool must resolve to the same document.
+        direct = sw_session.open_document(part_copy)
+        assert direct is not None
+        act = require(documents.activate_document(part_copy))
+        assert act.get("action") == "activated", act
+        rebuilt = require(documents.rebuild_document(part_copy))
+        assert "needs_rebuild" in rebuilt, rebuilt
+        return "%d open doc(s), opened/activated/rebuilt ok" % listed["count"]
+
+    r.check("list/open/activate/rebuild documents", _document_lifecycle)
+
+    def _save_and_import():
+        step_target = os.path.join(workdir, "roundtrip.step")
+        saved = require(documents.save_document(part_copy, new_path=step_target))
+        assert saved.get("action") == "exported" and os.path.exists(step_target), saved
+        imported = require(documents.import_file(step_target))
+        assert imported.get("title"), imported
+        closed = require(documents.close_document(imported["title"]))
+        assert closed.get("action") == "closed", closed
+        return "step export -> import -> close round-trip"
+
+    r.check("save_document / import_file / close_document", _save_and_import)
+
+    def _custom_props():
+        got = require(properties.get_custom_properties(part_copy))
+        assert "properties" in got, got
+        applied = require(properties.set_custom_property(
+            part_copy, "smoke_prop", "smoke_value", apply=True))
+        assert applied.get("verified") is True, applied
+        removed = require(properties.delete_custom_property(
+            part_copy, "smoke_prop", apply=True))
+        assert removed.get("verified") is True, removed
+        return "%d props, set+delete verified" % got["count"]
+
+    r.check("custom properties get/set/delete", _custom_props)
+
+    def _mates_and_interference():
+        mates = require(assembly.list_mates(asm_copy))
+        assert "items" in mates, mates
+        inter = require(assembly.check_interference(asm_copy))
+        assert "interferences" in inter, inter
+        return "%d mates, %d interferences" % (mates["mates"], inter["interferences"])
+
+    r.check("list_mates + check_interference", _mates_and_interference)
+
+    def _configs_and_state():
+        configs = require(assembly.list_configurations(asm_copy))
+        assert configs["count"] >= 1, configs
+        target = configs.get("active") or (configs["configurations"] or [None])[0]
+        dry = require(assembly.activate_configuration(asm_copy, target, apply=False))
+        assert dry.get("dry_run") is True, dry
+        comp = (tree.get("tree") or [{}])[0].get("component")
+        if comp:
+            state = require(assembly.set_component_state(asm_copy, comp, "suppressed", apply=False))
+            assert state.get("dry_run") is True, state
+        return "%d configs, activate+state dry-run" % configs["count"]
+
+    r.check("list_configurations + activate/state dry-run", _configs_and_state)
+
+    def _capture_and_features():
+        cap = require(assembly.capture_model_views(
+            part_copy, workdir, views=["*Isometric"]))
+        assert cap["written"] >= 1, cap
+        feats = require(ledger.list_features(part_copy))
+        assert feats["count"] >= 1, feats
+        return "%d view(s) written, %d features" % (cap["written"], feats["count"])
+
+    r.check("capture_model_views + list_features", _capture_and_features)
+
+    def _measure():
+        # Selection needs geometry knowledge of the fixture, so a structured
+        # failure is an acceptable outcome; what matters is the call doesn't crash.
+        payload = measure.measure_entities(
+            part_copy, [{"type": "FACE", "name": "Front Plane"}])
+        assert isinstance(payload, dict) and ("ok" in payload), payload
+        if payload["ok"] is False:
+            assert payload.get("error"), payload
+            return "structured failure (%s) — selection needs fixture geometry" % payload["error"]
+        return "measured: %s" % {k: v for k, v in payload.items() if k.endswith(("distance", "area"))}
+
+    r.check("measure_entities", _measure)
+
+    def _macro_dry():
+        fake = os.path.join(workdir, "smoke_macro.swp")
+        open(fake, "w").close()
+        payload = require(documents.run_macro(fake))
+        assert payload.get("dry_run") is True, payload
+        return "dry-run validates path+extension"
+
+    r.check("run_macro dry-run", _macro_dry)
+
+    def _run_batch():
+        import json as _json_mod
+
+        from solidworks_assetmate_mechdog import server as _server
+        payload = _json_mod.loads(_server.run_batch(
+            calls=[{"tool": "list_configurations", "args": {"model_path": part_copy}},
+                   {"tool": "__no_such_tool__", "args": {}},
+                   {"tool": "run_batch", "args": {"calls": []}}]))
+        assert payload["count"] == 3, payload
+        assert payload["results"][0]["result"].get("ok") is True, payload
+        assert payload["results"][1]["result"].get("error") == "unknown_tool", payload
+        assert payload["results"][2]["result"].get("error") == "unknown_tool", payload
+        return "3 calls: ok / unknown_tool / self-recursion refused"
+
+    r.check("run_batch", _run_batch)
+
     # Last on purpose — see the docstring: this one deliberately poisons the COM cache.
     r.check("bridge self-heal (P0-1)", _bridge_selfheal)
 

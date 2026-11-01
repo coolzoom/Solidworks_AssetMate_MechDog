@@ -1598,3 +1598,55 @@ suffix = "（其中 %d 条位置在视图附近，但引线未验证）" % near_
 
 真正的判据在 `IAnnotation.GetLeader` 那一侧（引线指向哪个实体），下一轮探。
 探不到就老实标 `unknown`，**不要当成"有"**。
+
+## 二十、COM 线程与文档会话（2026-11-01 新增，v0.9.0）
+
+### 工具体必须跑在单一 STA 线程
+
+FastMCP 把同步工具分发到 anyio 线程池，**每次调用可能落在不同线程**。在
+线程 A 单元里创建的 IDispatch 指针，在线程 B 直接调用会绕过封送，间歇报
+`RPC_E_WRONG_THREAD` / `Not connected`——和 P0-1 修的桥断症状同族。
+
+借鉴 haunchen/solidworks-mcp 与 yezg9920-kely/solidworks-mcp 的做法：
+`sw_session.run_on_com_thread(fn)` 把全部工具体收编到一个常驻
+`sw-com` 线程（`pythoncom.CoInitialize()` 起 STA），server.py 的所有 wrapper
+统一 `return _json(lambda: module.func(...))`。
+- 已在 COM 线程上的嵌套调用（`run_batch` 转发内部工具）直接行内执行，不自死锁。
+- `ASSETMATE_COM_INLINE=1` 或无 pywin32 时回退行内执行（本机/CI 静态检查依赖它）。
+
+### 路径沙箱
+
+`ASSETMATE_ALLOWED_ROOTS`（分号分隔目录）设了之后，`open_document` 与
+新文档工具会拒绝越界路径（`PermissionError` → `path_not_allowed`）。
+借鉴 jaylamping/solidworks-mcp 的 `SOLIDWORKS_MCP_ALLOWED_ROOTS`。默认不开启；
+`ping()` 回显 `allowed_roots` 便于验证开关状态。
+
+### LoadFile4 接中性格式
+
+`OpenDoc6` 只吃 .sldprt/.sldasm/.slddrw 三种 doc_type；STEP/IGES/x_t/SAT/STL
+要走 `ISldWorks.LoadFile4(path, "r", None, errors)`，errors 同样是 byref I4
+VARIANT。返回的文档对象可能为 None，要回 `ActiveDoc` 兜底。
+
+### 配合读取走 MateGroup 子特征
+
+装配没有直接的 mates 枚举：遍历 `doc.FirstFeature`，找
+`GetTypeName2 == "MateGroup"`，其 `GetFirstSubFeature`/`GetNextSubFeature`
+链上的每个特征的 `GetSpecificFeature2` 是一个 `IMate2`
+（`.Type` 枚举、`GetMateEntityCount()`、`MateEntity(i).ReferenceComponent.Name2`）。
+
+### 干涉检查要先解析轻化件
+
+`InterferenceDetectionManager.ToolsCheckInterference2` 对轻化组件静默看不见，
+先 `ResolveAllLightweightComponents(True)`；用完必须 `mgr.Done()`。
+
+### 自定义属性存表达式与解析值两份
+
+`CustomPropertyManager.Get5(name, True)` 回 `(value, resolved, was_resolved,
+linked)`：`SW-Mass@...` 存的是链接、解析值才是数字。写用
+`Add3(name, 30, value, 1)`（overwrite=swCustomPropertyAddOrChange），写完回读
+验证——链接属性会拒写，回读不符要报 `prop_not_applied`。
+
+### SetSuppression2 的状态码
+
+`IComponent2.SetSuppression2`：0=lightweight、1=suppressed、3=resolved。
+写完用 `GetSuppression` 回读，不要信调用成功。可见性走 `Visible` 属性。
